@@ -83,6 +83,8 @@ void readInputBuffer(string& inputBuffer) {
 
 MetaCommandResult doMetaCommand(string& inputBuffer) {
     if(inputBuffer == ".exit") {
+        cout << "Meowwww angyyyyy!" << endl;
+        cout << "😾😾😾😾😾\n";
         exit(EXIT_SUCCESS);
     } else {
         return MetaCommandResult::META_COMMAND_UNRECOGNIZED_COMMAND;
