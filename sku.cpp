@@ -4,8 +4,12 @@
 #include <cstring>
 #include <cstdlib>
 #include <string>
+#include <sstream>
 
 using namespace std;
+
+const int COLUMN_USERNAME_SIZE = 32;
+const int COLUMN_EMAIL_SIZE = 255;
 
 enum class MetaCommandResult {
     META_COMMAND_SUCCESS,
@@ -22,10 +26,35 @@ enum class StatementType {
     STATEMENT_SELECT
 };
 
-struct Statement {
-    StatementType type;
+struct Row {
+    u_int32_t id;
+    char username[COLUMN_USERNAME_SIZE];
+    char email[COLUMN_EMAIL_SIZE];
 };
 
+struct Statement {
+    StatementType type;
+    Row row_to_insert;
+};
+
+// compact representation of a row
+const u_int32_t ID_SIZE = sizeof(Row::id);
+const u_int32_t USERNAME_SIZE = sizeof(Row::username);
+const u_int32_t EMAIL_SIZE = sizeof(Row::email);
+const u_int32_t ID_OFFSET = 0;
+const u_int32_t USERNAME_OFFSET = ID_OFFSET + ID_SIZE;
+const u_int32_t EMAIL_OFFSET = USERNAME_OFFSET + USERNAME_SIZE;
+const u_int32_t ROW_SIZE = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
+
+const u_int32_t PAGE_SIZE = 4096;
+const int TABLE_MAX_PAGES = 100;
+const u_int32_t ROWS_PER_PAGE = PAGE_SIZE / ROW_SIZE;
+const u_int32_t TABLE_MAX_ROWS = ROWS_PER_PAGE * TABLE_MAX_PAGES;
+
+struct Table {
+    u_int32_t rowCount;
+    void* pages[TABLE_MAX_PAGES];
+};
 // function declarations
 
 void printPrompt();
@@ -33,6 +62,10 @@ void readInputBuffer(string& inputBuffer);
 MetaCommandResult doMetaCommand(string& inputBuffer);
 PrepareResult prepareStatement(string inputBuffer, Statement* statement);
 void execute(Statement* statement);
+void serializeRow(Row* src, void* dest);
+void deserializeRow(void* src, Row* dest);
+void* rowSlot(Table* table, u_int32_t rowNum);
+
 
 int main() {
     string inputBuffer = "";
@@ -93,9 +126,18 @@ MetaCommandResult doMetaCommand(string& inputBuffer) {
 }
 
 PrepareResult prepareStatement(string inputBuffer, Statement* statement) {
+    int id;
+    char usrnm[COLUMN_USERNAME_SIZE];
+    char eml[COLUMN_EMAIL_SIZE];
+    stringstream ss(inputBuffer);
+
     if(inputBuffer.substr(0, 6) == "insert") {
         statement->type = StatementType::STATEMENT_INSERT;
-        return PrepareResult::PREPARE_SUCCESS;
+        if(ss >> id >> usrnm >> eml) {
+            return PrepareResult::PREPARE_SUCCESS;
+        } else {
+            return PrepareResult::PREPARE_UNRECOGNIZED_STATEMENT;
+        }
     } else if(inputBuffer.substr(0, 6) == "select") {
         statement->type = StatementType::STATEMENT_SELECT;
         return PrepareResult::PREPARE_SUCCESS;
@@ -105,6 +147,7 @@ PrepareResult prepareStatement(string inputBuffer, Statement* statement) {
 }
 
 void execute(Statement* statement) {
+
     switch (statement->type)
     {
         case (StatementType::STATEMENT_INSERT):
@@ -113,4 +156,35 @@ void execute(Statement* statement) {
         case (StatementType::STATEMENT_SELECT):
             cout << "Select statement yayyyyyy meowwwwwww\n";
     }
+}
+
+void serializeRow(Row* src, void* dest) {
+    char* destination = static_cast<char*>(dest);
+
+    memcpy(destination + ID_OFFSET, &(src->id), ID_SIZE);
+    memcpy(destination + USERNAME_OFFSET, &(src->username), USERNAME_SIZE);
+    memcpy(destination + EMAIL_OFFSET, &(src->email), EMAIL_SIZE);
+} 
+
+void deserializeRow(void* src, Row* dest) {
+    const char* source = static_cast<const char*>(src);
+    
+    memcpy(&(dest->id), source + ID_OFFSET, ID_SIZE);
+    memcpy(&(dest->username), source + USERNAME_OFFSET, USERNAME_SIZE); 
+    memcpy(&(dest->email), source + EMAIL_OFFSET, EMAIL_SIZE);
+}
+
+void* rowSlot(Table* table, u_int32_t rowNum) {
+    u_int32_t pageNum = rowNum / ROWS_PER_PAGE;
+
+    void* page = table->pages[pageNum];
+
+    if(page == nullptr) {
+        page = table->pages[pageNum] = new char[PAGE_SIZE];
+    }
+
+    u_int32_t rowOffset = rowNum % ROWS_PER_PAGE;
+    u_int32_t byteOffset = rowOffset % ROW_SIZE;
+
+    return static_cast<char*>(page) + byteOffset;
 }
