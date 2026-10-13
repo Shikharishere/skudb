@@ -25,7 +25,9 @@ enum class MetaCommandResult {
 enum class PrepareResult {
     PREPARE_SUCCESS,
     PREPARE_UNRECOGNIZED_STATEMENT,
-    PREPARE_SYNTAX_ERROR
+    PREPARE_SYNTAX_ERROR,
+    PREPARE_STRING_TOO_LONG,
+    PREPARE_NEGATIVE_ID
 };
 
 enum class StatementType {
@@ -93,7 +95,7 @@ int main() {
                 case (MetaCommandResult::META_COMMAND_SUCCESS):
                     continue;
                 case (MetaCommandResult::META_COMMAND_UNRECOGNIZED_COMMAND):
-                    cout << "Unrecognized meta command '" << inputBuffer <<  "'" << endl;
+                    cout << "\nUnrecognized meta command '" << inputBuffer <<  "'" << endl;
                     continue;
             }
         }
@@ -103,11 +105,17 @@ int main() {
         {
             case (PrepareResult::PREPARE_SUCCESS):
                 break;
-            case (PrepareResult::PREPARE_SYNTAX_ERROR):
+            case (PrepareResult::PREPARE_STRING_TOO_LONG):
+                cout << "\nString is too long." << endl;
                 continue;
-                cout << "Syntax error. Could not parse statement." << endl;
+            case (PrepareResult::PREPARE_NEGATIVE_ID):
+                cout << "\nID must be positive." << endl;
+                continue;
+            case (PrepareResult::PREPARE_SYNTAX_ERROR):
+                cout << "\nSyntax error. Could not parse statement." << endl;
+                continue;
             case (PrepareResult::PREPARE_UNRECOGNIZED_STATEMENT):
-                cout << "Unrecognized keyword at the start of '" << inputBuffer << "'"<< endl;
+                cout << "\nUnrecognized keyword at the start of '" << inputBuffer << "'"<< endl;
                 continue;
         }
 
@@ -115,7 +123,7 @@ int main() {
             case ExecuteResult::EXECUTE_SUCCESS:
                 break;
             case ExecuteResult::EXECUTE_TABLE_FULL:
-                cout << "Error: Table full! Meow" << endl;
+                cout << "\nError: Table full! Meow" << endl;
                 break;
         }
     }
@@ -128,14 +136,14 @@ void printPrompt() {
 void readInputBuffer(string& inputBuffer) {
     getline(cin, inputBuffer);
 
-    if(inputBuffer.length() <= 0) {
-        cout << "Error reading input\n";
+    if (inputBuffer.length() <= 0) {
+        cout << "\nError reading input\n";
         exit(EXIT_FAILURE);
     }
 }
 
 MetaCommandResult doMetaCommand(string& inputBuffer) {
-    if(inputBuffer == ".exit") {
+    if (inputBuffer == ".exit") {
         cout << "Exiting..." << endl;
         cout << "Meowwww angyyyyy!" << endl;
         cout << "😾😾😾😾😾\n";
@@ -148,20 +156,31 @@ MetaCommandResult doMetaCommand(string& inputBuffer) {
 
 PrepareResult prepareStatement(string inputBuffer, Statement* statement) {
     int id;
-    char usrnm[COLUMN_USERNAME_SIZE];
-    char eml[COLUMN_EMAIL_SIZE];
+    char username[COLUMN_USERNAME_SIZE];
+    char email[COLUMN_EMAIL_SIZE];
     string command;
     stringstream ss(inputBuffer);
     ss >> command;
 
-    if(command == "insert") {
+    if (command == "insert") {
         statement->type = StatementType::STATEMENT_INSERT;
-        if(ss >> statement->row_to_insert.id>> statement->row_to_insert.username >> statement->row_to_insert.email) {
+        if (ss >> id >> username >> email) {
+            if ((strlen(username) > COLUMN_USERNAME_SIZE) || (strlen(email) > COLUMN_EMAIL_SIZE)) {
+                return PrepareResult::PREPARE_STRING_TOO_LONG;
+            }
+
+            if(id < 0) {
+                return PrepareResult::PREPARE_NEGATIVE_ID;
+            }
+
+            statement->row_to_insert.id = id;
+            strcpy(statement->row_to_insert.email, email);
+            strcpy(statement->row_to_insert.username, username);
             return PrepareResult::PREPARE_SUCCESS;
         } else {
             return PrepareResult::PREPARE_UNRECOGNIZED_STATEMENT;
         }
-    } else if(command == "select") {
+    } else if (command == "select") {
         statement->type = StatementType::STATEMENT_SELECT;
         return PrepareResult::PREPARE_SUCCESS;
     }
@@ -171,7 +190,7 @@ PrepareResult prepareStatement(string inputBuffer, Statement* statement) {
 
 ExecuteResult executeInsert(Statement* statement, Table* table) {
 
-    if(table->rowCount >= TABLE_MAX_ROWS) {
+    if (table->rowCount >= TABLE_MAX_ROWS) {
         return ExecuteResult::EXECUTE_TABLE_FULL;
     }
     
@@ -187,7 +206,10 @@ ExecuteResult executeInsert(Statement* statement, Table* table) {
 
 ExecuteResult executeSelect(Statement* statement, Table* table) {
     Row row;
-    for(u_int32_t i = 0; i < table->rowCount; i++) {
+
+    cout << endl;
+
+    for (u_int32_t i = 0; i < table->rowCount; i++) {
         deserializeRow(rowSlot(table, i), &row);
         printRow(&row);
     }
@@ -214,8 +236,6 @@ ExecuteResult executeStatement(Statement* statement, Table* table) {
     }
 }
 
-
-
 void serializeRow(Row* src, void* dest) {
     char* destination = static_cast<char*>(dest);
 
@@ -237,7 +257,7 @@ void* rowSlot(Table* table, u_int32_t rowNum) {
 
     void* page = table->pages[pageNum];
 
-    if(page == nullptr) {
+    if (page == nullptr) {
         page = table->pages[pageNum] = new char[PAGE_SIZE];
     }
 
