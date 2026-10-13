@@ -11,6 +11,12 @@ using namespace std;
 const int COLUMN_USERNAME_SIZE = 32;
 const int COLUMN_EMAIL_SIZE = 255;
 
+enum class ExecuteResult {
+    EXECUTE_TABLE_FULL,
+    EXECUTE_SUCCESS,
+    EXECUTE_UNSUPPORTED_COMMAND
+};
+
 enum class MetaCommandResult {
     META_COMMAND_SUCCESS,
     META_COMMAND_UNRECOGNIZED_COMMAND
@@ -18,7 +24,8 @@ enum class MetaCommandResult {
 
 enum class PrepareResult {
     PREPARE_SUCCESS,
-    PREPARE_UNRECOGNIZED_STATEMENT
+    PREPARE_UNRECOGNIZED_STATEMENT,
+    PREPARE_SYNTAX_ERROR
 };
 
 enum class StatementType {
@@ -61,13 +68,18 @@ void printPrompt();
 void readInputBuffer(string& inputBuffer);
 MetaCommandResult doMetaCommand(string& inputBuffer);
 PrepareResult prepareStatement(string inputBuffer, Statement* statement);
-void execute(Statement* statement);
+ExecuteResult executeStatement(Statement* statement, Table* table);
+ExecuteResult executeInsert(Statement* statement, Table* table);
+ExecuteResult executeSelect(Statement* statement, Table* table);
+void printRow(Row* row);
 void serializeRow(Row* src, void* dest);
 void deserializeRow(void* src, Row* dest);
 void* rowSlot(Table* table, u_int32_t rowNum);
+Table createTable();
 
 
 int main() {
+    Table table = createTable();
     string inputBuffer = "";
     while(true) {
         cout << endl;
@@ -91,13 +103,21 @@ int main() {
         {
             case (PrepareResult::PREPARE_SUCCESS):
                 break;
+            case (PrepareResult::PREPARE_SYNTAX_ERROR):
+                continue;
+                cout << "Syntax error. Could not parse statement." << endl;
             case (PrepareResult::PREPARE_UNRECOGNIZED_STATEMENT):
                 cout << "Unrecognized keyword at the start of '" << inputBuffer << "'"<< endl;
                 continue;
         }
 
-        execute(&statement);
-        cout << "Executed\n";
+        switch(executeStatement(&statement, &table)) {
+            case ExecuteResult::EXECUTE_SUCCESS:
+                break;
+            case ExecuteResult::EXECUTE_TABLE_FULL:
+                cout << "Error: Table full! Meow" << endl;
+                break;
+        }
     }
 }
 
@@ -116,6 +136,7 @@ void readInputBuffer(string& inputBuffer) {
 
 MetaCommandResult doMetaCommand(string& inputBuffer) {
     if(inputBuffer == ".exit") {
+        cout << "Exiting..." << endl;
         cout << "Meowwww angyyyyy!" << endl;
         cout << "😾😾😾😾😾\n";
         exit(EXIT_SUCCESS);
@@ -129,16 +150,18 @@ PrepareResult prepareStatement(string inputBuffer, Statement* statement) {
     int id;
     char usrnm[COLUMN_USERNAME_SIZE];
     char eml[COLUMN_EMAIL_SIZE];
+    string command;
     stringstream ss(inputBuffer);
+    ss >> command;
 
-    if(inputBuffer.substr(0, 6) == "insert") {
+    if(command == "insert") {
         statement->type = StatementType::STATEMENT_INSERT;
-        if(ss >> id >> usrnm >> eml) {
+        if(ss >> statement->row_to_insert.id>> statement->row_to_insert.username >> statement->row_to_insert.email) {
             return PrepareResult::PREPARE_SUCCESS;
         } else {
             return PrepareResult::PREPARE_UNRECOGNIZED_STATEMENT;
         }
-    } else if(inputBuffer.substr(0, 6) == "select") {
+    } else if(command == "select") {
         statement->type = StatementType::STATEMENT_SELECT;
         return PrepareResult::PREPARE_SUCCESS;
     }
@@ -146,17 +169,52 @@ PrepareResult prepareStatement(string inputBuffer, Statement* statement) {
     return PrepareResult::PREPARE_UNRECOGNIZED_STATEMENT;
 }
 
-void execute(Statement* statement) {
+ExecuteResult executeInsert(Statement* statement, Table* table) {
 
+    if(table->rowCount >= TABLE_MAX_ROWS) {
+        return ExecuteResult::EXECUTE_TABLE_FULL;
+    }
+    
+    Row* rowToInsert = &(statement->row_to_insert);
+    serializeRow(rowToInsert, rowSlot(table, table->rowCount));
+    table->rowCount++; 
+
+    cout << endl;
+    cout << "Inserted 1 row succesfully!" << endl;
+
+    return ExecuteResult::EXECUTE_SUCCESS;
+}
+
+ExecuteResult executeSelect(Statement* statement, Table* table) {
+    Row row;
+    for(u_int32_t i = 0; i < table->rowCount; i++) {
+        deserializeRow(rowSlot(table, i), &row);
+        printRow(&row);
+    }
+    cout << endl;
+    cout << table->rowCount << " rows projected!" << endl;
+
+    return ExecuteResult::EXECUTE_SUCCESS;
+}
+
+void printRow(Row *row)
+{
+    cout << "(" << row->id << ", " << row->username << ", " << row->email << ")" << endl;
+}
+
+ExecuteResult executeStatement(Statement* statement, Table* table) {
     switch (statement->type)
     {
-        case (StatementType::STATEMENT_INSERT):
-            cout << "Damn! An insert statement 0_0\n";
-            break;
-        case (StatementType::STATEMENT_SELECT):
-            cout << "Select statement yayyyyyy meowwwwwww\n";
+        case StatementType::STATEMENT_INSERT:
+            return executeInsert(statement, table);
+        case StatementType::STATEMENT_SELECT:
+            return executeSelect(statement, table);
+        default:
+            return ExecuteResult::EXECUTE_UNSUPPORTED_COMMAND;
     }
 }
+
+
 
 void serializeRow(Row* src, void* dest) {
     char* destination = static_cast<char*>(dest);
@@ -184,7 +242,19 @@ void* rowSlot(Table* table, u_int32_t rowNum) {
     }
 
     u_int32_t rowOffset = rowNum % ROWS_PER_PAGE;
-    u_int32_t byteOffset = rowOffset % ROW_SIZE;
+    u_int32_t byteOffset = rowOffset * ROW_SIZE;
 
     return static_cast<char*>(page) + byteOffset;
+}
+
+Table createTable()
+{
+    Table table;
+    table.rowCount = 0;
+
+    for(int i = 0; i < TABLE_MAX_PAGES; i++) {
+        table.pages[i] = nullptr;
+    }
+
+    return table;
 }
