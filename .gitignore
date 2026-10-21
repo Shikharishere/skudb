@@ -1,3 +1,4 @@
 .vscode/
 sku.out
 build/
+sku.db

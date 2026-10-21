@@ -5,7 +5,7 @@ build:
     cmake --build build
 
 run: build
-     ./build/skuDB
+     ./build/skuDB sku.db
 
 test: build
       cd build && ctest --output-on-failure

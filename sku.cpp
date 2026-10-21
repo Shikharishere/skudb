@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <string>
 #include <sstream>
+#include <fstream>
 
 using namespace std;
 
@@ -60,15 +61,23 @@ const int TABLE_MAX_PAGES = 100;
 const u_int32_t ROWS_PER_PAGE = PAGE_SIZE / ROW_SIZE;
 const u_int32_t TABLE_MAX_ROWS = ROWS_PER_PAGE * TABLE_MAX_PAGES;
 
-struct Table {
-    u_int32_t rowCount;
+struct Pager {
+    FILE* fileDescriptor;
+    long fileLength;
     void* pages[TABLE_MAX_PAGES];
 };
+
+struct Table {
+    u_int32_t rowCount;
+    Pager* pager;
+};
+
+
 // function declarations
 
 void printPrompt();
 void readInputBuffer(string& inputBuffer);
-MetaCommandResult doMetaCommand(string& inputBuffer);
+MetaCommandResult doMetaCommand(string& inputBuffer, Table* table);
 PrepareResult prepareStatement(string inputBuffer, Statement* statement);
 ExecuteResult executeStatement(Statement* statement, Table* table);
 ExecuteResult executeInsert(Statement* statement, Table* table);
@@ -77,11 +86,21 @@ void printRow(Row* row);
 void serializeRow(Row* src, void* dest);
 void deserializeRow(void* src, Row* dest);
 void* rowSlot(Table* table, u_int32_t rowNum);
-Table createTable();
+Table* openDB(const char* filename);
+void pagerFlush(Pager* pager, int pageNum, int size);
+long getFileSize(const char* filename);
+Pager* pagerOpen(const char* filename);
+void* getPage(Pager* pager, int pageNum);
+void dbClose(Table* table);
 
 
-int main() {
-    Table table = createTable();
+int main(int argc, char* argv[]) {
+    if(argc < 2) {
+        cerr << "Must supply a database filename\n";
+        exit(EXIT_FAILURE);
+    }
+    const char* filename = argv[1];
+    Table* table = openDB(filename);
     string inputBuffer = "";
     while(true) {
         cout << endl;
@@ -90,7 +109,7 @@ int main() {
         readInputBuffer(inputBuffer);
         
         if(inputBuffer[0] == '.') {
-            switch (doMetaCommand(inputBuffer))
+            switch (doMetaCommand(inputBuffer, table))
             {
                 case (MetaCommandResult::META_COMMAND_SUCCESS):
                     continue;
@@ -119,7 +138,7 @@ int main() {
                 continue;
         }
 
-        switch(executeStatement(&statement, &table)) {
+        switch(executeStatement(&statement, table)) {
             case ExecuteResult::EXECUTE_SUCCESS:
                 break;
             case ExecuteResult::EXECUTE_TABLE_FULL:
@@ -142,8 +161,9 @@ void readInputBuffer(string& inputBuffer) {
     }
 }
 
-MetaCommandResult doMetaCommand(string& inputBuffer) {
+MetaCommandResult doMetaCommand(string& inputBuffer, Table* table) {
     if (inputBuffer == ".exit") {
+        dbClose(table);
         cout << "Exiting..." << endl;
         cout << "Meowwww angyyyyy!" << endl;
         cout << "😾😾😾😾😾\n";
@@ -254,27 +274,138 @@ void deserializeRow(void* src, Row* dest) {
 
 void* rowSlot(Table* table, u_int32_t rowNum) {
     u_int32_t pageNum = rowNum / ROWS_PER_PAGE;
-
-    void* page = table->pages[pageNum];
-
-    if (page == nullptr) {
-        page = table->pages[pageNum] = new char[PAGE_SIZE];
-    }
-
+    void* page = getPage(table->pager, pageNum);
     u_int32_t rowOffset = rowNum % ROWS_PER_PAGE;
     u_int32_t byteOffset = rowOffset * ROW_SIZE;
 
     return static_cast<char*>(page) + byteOffset;
 }
 
-Table createTable()
-{
-    Table table;
-    table.rowCount = 0;
+void* getPage(Pager* pager, int pageNum) {
+    if(pageNum > TABLE_MAX_PAGES) {
+        cout << "Tried to fetch page number out of bounds. " << pageNum << " > " << TABLE_MAX_PAGES << endl;
+        exit(EXIT_FAILURE);
+    }
+    
+    if(pager->pages[pageNum] == nullptr) {
+        // cache miss. Allocate memory and load from file
+        void* page = new char[PAGE_SIZE]();
+        int numPages = pager->fileLength / PAGE_SIZE;
 
-    for(int i = 0; i < TABLE_MAX_PAGES; i++) {
-        table.pages[i] = nullptr;
+        // We might save a partial page at the end of the file
+        if(pager->fileLength % PAGE_SIZE) {
+            numPages++;
+        }
+
+        if(pageNum <= numPages) {
+            fseek(pager->fileDescriptor, pageNum * PAGE_SIZE, SEEK_SET);
+            int bytesRead = fread(page, 1, pager->fileLength, pager->fileDescriptor);
+        }
+        pager->pages[pageNum] = page;
     }
 
+    return pager->pages[pageNum];
+
+}
+
+Table* openDB(const char* filename)
+{
+    Pager* pager = pagerOpen(filename);
+    int rowCount = pager->fileLength / ROW_SIZE;
+
+    Table* table = new Table();
+
+    table->pager = pager;
+    table->rowCount = rowCount;
+
     return table;
+}
+
+void dbClose(Table* table) {
+    Pager* pager = table->pager;
+    int numFullPages = table->rowCount / ROWS_PER_PAGE;
+
+    for(int i = 0; i < numFullPages; i++) {
+        if(pager->pages[i] == nullptr) {
+            continue;
+        }
+        pagerFlush(pager, i, PAGE_SIZE);
+        delete[] static_cast<char*>(pager->pages[i]);
+        pager->pages[i] = nullptr;
+    }
+
+    int additionalRows = table->rowCount % ROWS_PER_PAGE;
+    if(additionalRows > 0) {
+        int pageNum = numFullPages;
+        if(pager->pages[pageNum] != nullptr) {
+            pagerFlush(pager, pageNum, additionalRows * ROW_SIZE);
+            delete[] static_cast<char*>(pager->pages[pageNum]);
+            pager->pages[pageNum] = nullptr;
+        }
+    }
+
+    int result = fclose(pager->fileDescriptor);
+    if(result == -1) {
+        cout << "Error closing db file\n";
+        exit(EXIT_FAILURE);
+    }
+
+    for(int i = 0; i < TABLE_MAX_PAGES; i++) {
+        void* page = pager->pages[i];
+        if(page) {
+            delete static_cast<char*>(page);
+            pager->pages[i] = nullptr;
+        }
+    }
+
+    delete pager;    
+}
+
+Pager* pagerOpen(const char* filename) {
+    FILE* file = fopen(filename, "r+b");
+
+    if(file == nullptr) {
+        cout << "Unable to open file\n";
+        exit(EXIT_FAILURE);
+    }
+
+    Pager *pager = new Pager();
+    pager->fileDescriptor = file;
+    pager->fileLength = getFileSize(filename);
+    
+    for(int i = 0; i < TABLE_MAX_PAGES; i++) {
+        pager->pages[i] = nullptr;
+    }
+
+    return pager;
+}
+
+long getFileSize(const char* filename) {
+    FILE* fp = fopen(filename, "rb");
+    if(fp == nullptr) {
+        cout << "Unable to open file\n";
+        exit(EXIT_FAILURE);
+    }
+
+    if(fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return -1;
+    }
+
+    long size = ftell(fp);
+
+    fclose(fp);
+
+    return size;
+}
+
+void pagerFlush(Pager* pager, int pageNum, int size) {
+    if(pager->pages[pageNum] == nullptr) {
+        cout << "Tried to flush null\n";
+        exit(EXIT_FAILURE);
+    }
+
+    fseek(pager->fileDescriptor, pageNum * PAGE_SIZE, SEEK_SET);
+
+    int bytesWritten = fwrite(pager->pages[pageNum], 1, size, pager->fileDescriptor);
 }
