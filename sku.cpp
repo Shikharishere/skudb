@@ -1,4 +1,7 @@
-// skuDB - skuba db 🐈
+/*
+    skuDB - skuba db 🐈
+    Author : Shikhar Upadhyay
+*/ 
 
 #include <iostream>
 #include <cstring>
@@ -72,6 +75,11 @@ struct Table {
     Pager* pager;
 };
 
+struct Cursor {
+    Table* table;
+    int rowNum;
+    bool endOfTable;
+};
 
 // function declarations
 
@@ -85,13 +93,16 @@ ExecuteResult executeSelect(Statement* statement, Table* table);
 void printRow(Row* row);
 void serializeRow(Row* src, void* dest);
 void deserializeRow(void* src, Row* dest);
-void* rowSlot(Table* table, u_int32_t rowNum);
+void* cursorValue(Cursor* cursor);
 Table* openDB(const char* filename);
 void pagerFlush(Pager* pager, int pageNum, int size);
 long getFileSize(const char* filename);
 Pager* pagerOpen(const char* filename);
 void* getPage(Pager* pager, int pageNum);
 void dbClose(Table* table);
+Cursor* tableStart(Table* table);
+Cursor* tableEnd(Table* table);
+void cursorAdvance(Cursor* cursor);
 
 
 int main(int argc, char* argv[]) {
@@ -209,32 +220,38 @@ PrepareResult prepareStatement(string inputBuffer, Statement* statement) {
 }
 
 ExecuteResult executeInsert(Statement* statement, Table* table) {
-
     if (table->rowCount >= TABLE_MAX_ROWS) {
         return ExecuteResult::EXECUTE_TABLE_FULL;
     }
     
     Row* rowToInsert = &(statement->row_to_insert);
-    serializeRow(rowToInsert, rowSlot(table, table->rowCount));
+    Cursor* cursor = tableEnd(table);
+
+    serializeRow(rowToInsert, cursorValue(cursor));
     table->rowCount++; 
 
     cout << endl;
     cout << "Inserted 1 row succesfully!" << endl;
 
+    delete cursor;
+
     return ExecuteResult::EXECUTE_SUCCESS;
 }
 
 ExecuteResult executeSelect(Statement* statement, Table* table) {
+    Cursor* cursor = tableStart(table);
     Row row;
 
     cout << endl;
 
     for (u_int32_t i = 0; i < table->rowCount; i++) {
-        deserializeRow(rowSlot(table, i), &row);
+        deserializeRow(cursorValue(cursor), &row);
         printRow(&row);
     }
     cout << endl;
     cout << table->rowCount << " rows projected!" << endl;
+
+    delete cursor;
 
     return ExecuteResult::EXECUTE_SUCCESS;
 }
@@ -272,10 +289,10 @@ void deserializeRow(void* src, Row* dest) {
     memcpy(&(dest->email), source + EMAIL_OFFSET, EMAIL_SIZE);
 }
 
-void* rowSlot(Table* table, u_int32_t rowNum) {
-    u_int32_t pageNum = rowNum / ROWS_PER_PAGE;
-    void* page = getPage(table->pager, pageNum);
-    u_int32_t rowOffset = rowNum % ROWS_PER_PAGE;
+void* cursorValue(Cursor* cursor) {
+    u_int32_t pageNum = cursor->rowNum / ROWS_PER_PAGE;
+    void* page = getPage(cursor->table->pager, pageNum);
+    u_int32_t rowOffset = cursor->rowNum % ROWS_PER_PAGE;
     u_int32_t byteOffset = rowOffset * ROW_SIZE;
 
     return static_cast<char*>(page) + byteOffset;
@@ -408,4 +425,29 @@ void pagerFlush(Pager* pager, int pageNum, int size) {
     fseek(pager->fileDescriptor, pageNum * PAGE_SIZE, SEEK_SET);
 
     int bytesWritten = fwrite(pager->pages[pageNum], 1, size, pager->fileDescriptor);
+}
+
+Cursor* tableStart(Table* table) {
+    Cursor* cursor = new Cursor();
+    cursor->table = table;
+    cursor->rowNum = 0;
+    cursor->endOfTable = (table->rowCount == 0);
+
+    return cursor;
+}
+
+Cursor* tableEnd(Table* table) {
+    Cursor* cursor = new Cursor();
+    cursor->table = table;
+    cursor->rowNum = table->rowCount;
+    cursor->endOfTable = true;
+
+    return cursor;
+}
+
+void cursorAdvance(Cursor* cursor) {
+    cursor->rowNum++;
+    if(cursor->rowNum >= cursor->table->rowCount) {
+        cursor->endOfTable = true;
+    }
 }
