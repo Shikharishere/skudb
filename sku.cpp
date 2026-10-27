@@ -94,6 +94,22 @@ const u_int32_t LEAF_NODE_RIGHT_SPLIT_COUNT = (LEAF_NODE_MAX_CELLS + 1) / 2;
 const u_int32_t LEAF_NODE_LEFT_SPLIT_COUNT =
     (LEAF_NODE_MAX_CELLS + 1) - LEAF_NODE_RIGHT_SPLIT_COUNT;
 
+// Internal Node header layout
+const uint32_t INTERNAL_NODE_NUM_KEYS_SIZE = sizeof(uint32_t);
+const uint32_t INTERNAL_NODE_NUM_KEYS_OFFSET = COMMON_NODE_HEADER_SIZE;
+const uint32_t INTERNAL_NODE_RIGHT_CHILD_SIZE = sizeof(uint32_t);
+const uint32_t INTERNAL_NODE_RIGHT_CHILD_OFFSET =
+    INTERNAL_NODE_NUM_KEYS_OFFSET + INTERNAL_NODE_NUM_KEYS_SIZE;
+const uint32_t INTERNAL_NODE_HEADER_SIZE = COMMON_NODE_HEADER_SIZE +
+                                           INTERNAL_NODE_NUM_KEYS_SIZE +
+                                           INTERNAL_NODE_RIGHT_CHILD_SIZE;
+
+// Interanl Node body layout
+const uint32_t INTERNAL_NODE_KEY_SIZE = sizeof(uint32_t);
+const uint32_t INTERNAL_NODE_CHILD_SIZE = sizeof(uint32_t);
+const uint32_t INTERNAL_NODE_CELL_SIZE =
+    INTERNAL_NODE_KEY_SIZE + INTERNAL_NODE_CHILD_SIZE;
+
 struct Pager {
   FILE *fileDescriptor;
   long fileLength;
@@ -141,13 +157,23 @@ void *leafNodeValue(void *node, u_int32_t cellNum);
 void initializeLeafNode(void *node);
 void leafNodeInsert(Cursor *cursor, u_int32_t key, Row *value);
 void printConstants();
-void printLeafNode(void *node);
 Cursor *tableFind(Table *table, u_int32_t key);
 Cursor *leafNodeFind(Table *table, u_int32_t pageNum, u_int32_t key);
 NodeType getNodeType(void *node);
 void setNodeType(void *node, NodeType type);
 void leafNodeSplitAndInsert(Cursor *cursor, u_int32_t key, Row *value);
 u_int32_t getUnusedPageNum(Pager *pager);
+void setNodeRoot(void *node, bool isRoot);
+bool isNodeRoot(void *node);
+void initializeInternalNode(void *node);
+uint32_t getNodeMaxKey(void *node);
+uint32_t *internalNodeKey(void *node, uint32_t keyNum);
+u_int32_t *internalNodeChild(void *node, uint32_t childNum);
+uint32_t *internalNodeCell(void *node, uint32_t cellNum);
+uint32_t *internalNodeRightChild(void *node);
+uint32_t *internalNodeNumKeys(void *node);
+void createNewRoot(Table *table, uint32_t rightChildPageNum);
+void printTree(Pager *pager, uint32_t pageNum, uint32_t indentationLevel);
 
 int main(int argc, char *argv[]) {
   if (argc < 2) {
@@ -225,7 +251,7 @@ MetaCommandResult doMetaCommand(string &inputBuffer, Table *table) {
     exit(EXIT_SUCCESS);
   } else if (inputBuffer == ".btree") {
     cout << "Tree: " << endl;
-    printLeafNode(getPage(table->pager, 0));
+    printTree(table->pager, 0, 0);
     return MetaCommandResult::META_COMMAND_SUCCESS;
   } else if (inputBuffer == ".constants") {
     cout << "Constants: " << endl;
@@ -397,6 +423,7 @@ Table *openDB(const char *filename) {
   if (pager->numPages == 0) {
     void *rootNode = getPage(pager, 0);
     initializeLeafNode(rootNode);
+    setNodeRoot(rootNode, true);
   }
 
   return table;
@@ -575,7 +602,13 @@ void *leafNodeValue(void *node, u_int32_t cellNum) {
 
 void initializeLeafNode(void *node) {
   setNodeType(node, NodeType::NODE_LEAF);
+  setNodeRoot(node, false);
   *leafNodeNumCells(node) = 0;
+}
+void initializeInternalNode(void *node) {
+  setNodeType(node, NodeType::NODE_INTERNAL);
+  setNodeRoot(node, false);
+  *internalNodeNumKeys(node) = 0;
 }
 
 void leafNodeInsert(Cursor *cursor, u_int32_t key, Row *value) {
@@ -598,15 +631,6 @@ void leafNodeInsert(Cursor *cursor, u_int32_t key, Row *value) {
   *(leafNodeNumCells(node)) += 1;
   *(leafNodeKey(node, cursor->cellNum)) = key;
   serializeRow(value, leafNodeValue(node, cursor->cellNum));
-}
-
-void printLeafNode(void *node) {
-  u_int32_t numCells = *leafNodeNumCells(node);
-  cout << "leaf (size " << numCells << ")" << endl;
-  for (u_int32_t i = 0; i < numCells; i++) {
-    u_int32_t key = *leafNodeKey(node, i);
-    cout << "  - " << i << " : " << key << endl;
-  }
 }
 
 void printConstants() {
@@ -692,5 +716,96 @@ void createNewRoot(Table *table, u_int32_t rightChildPageNum) {
   *internalNodeChild(root, 0) = leftChildPageNum;
   u_int32_t leftChildMaxKey = getNodeMaxKey(leftChild);
   *internalNodeKey(root, 0) = leftChildMaxKey;
-  *internalNodeChild(root) = rightChildPageNum;
+  *internalNodeRightChild(root) = rightChildPageNum;
+}
+
+u_int32_t *internalNodeNumKeys(void *node) {
+  char *bytePtr = static_cast<char *>(node) + INTERNAL_NODE_NUM_KEYS_OFFSET;
+
+  return reinterpret_cast<u_int32_t *>(bytePtr);
+}
+
+u_int32_t *internalNodeRightChild(void *node) {
+  char *bytePtr = static_cast<char *>(node) + INTERNAL_NODE_RIGHT_CHILD_OFFSET;
+
+  return reinterpret_cast<u_int32_t *>(bytePtr);
+}
+
+u_int32_t *internalNodeCell(void *node, uint32_t cellNum) {
+  char *bytePtr = (static_cast<char *>(node) + INTERNAL_NODE_HEADER_SIZE) +
+                  cellNum * INTERNAL_NODE_CELL_SIZE;
+
+  return reinterpret_cast<u_int32_t *>(bytePtr);
+}
+
+uint32_t *internalNodeChild(void *node, uint32_t childNum) {
+  uint32_t numKeys = *internalNodeNumKeys(node);
+  if (childNum > numKeys) {
+    cout << "Tried to access " << childNum << " > " << numKeys << endl;
+    exit(EXIT_FAILURE);
+  } else if (childNum == numKeys) {
+    return internalNodeRightChild(node);
+  } else {
+    return internalNodeCell(node, childNum);
+  }
+}
+
+uint32_t *internalNodeKey(void *node, uint32_t keyNum) {
+  return internalNodeCell(node, keyNum) + INTERNAL_NODE_CHILD_SIZE;
+}
+
+uint32_t getNodeMaxKey(void *node) {
+  switch (getNodeType(node)) {
+  case NodeType::NODE_INTERNAL:
+    return *internalNodeKey(node, *internalNodeNumKeys(node) - 1);
+  case NodeType::NODE_LEAF:
+    return *leafNodeKey(node, *leafNodeNumCells(node) - 1);
+  }
+}
+
+bool isNodeRoot(void *node) {
+  uint8_t value = *((uint8_t *)(static_cast<char *>(node) + IS_ROOT_OFFSET));
+  return (bool)value;
+}
+
+void setNodeRoot(void *node, bool isRoot) {
+  uint8_t value = isRoot;
+  *((uint8_t *)(static_cast<char *>(node) + IS_ROOT_OFFSET)) = value;
+}
+
+void indent(uint32_t level) {
+  for (uint32_t i = 0; i < level; i++) {
+    cout << "  ";
+  }
+}
+
+void printTree(Pager *pager, uint32_t pageNum, uint32_t indentationLevel) {
+  void *node = getPage(pager, pageNum);
+  uint32_t numKeys, child;
+
+  switch (getNodeType(node)) {
+  case (NodeType::NODE_LEAF):
+    numKeys = *leafNodeNumCells(node);
+    indent(indentationLevel);
+    cout << "- leaf (size " << numKeys << ")" << endl;
+    for (uint32_t i = 0; i < numKeys; i++) {
+      indent(indentationLevel + 1);
+      cout << "- " << *leafNodeKey(node, i) << endl;
+    }
+    break;
+  case (NodeType::NODE_INTERNAL):
+    numKeys = *internalNodeNumKeys(node);
+    indent(indentationLevel);
+    cout << "- internal (size " << numKeys << ")" << endl;
+    for (uint32_t i = 0; i < numKeys; i++) {
+      child = *internalNodeChild(node, i);
+      printTree(pager, child, indentationLevel + 1);
+
+      indent(indentationLevel + 1);
+      cout << "- key " << *internalNodeKey(node, i) << endl;
+    }
+    child = *internalNodeRightChild(node);
+    printTree(pager, child, indentationLevel + 1);
+    break;
+  }
 }
