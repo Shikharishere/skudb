@@ -1,21 +1,21 @@
+
 /*
     skuDB - skuba db 🐈
     Author : Shikhar Upadhyay
 */
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <sstream>
 #include <string>
-#include <strings.h>
-#include <sys/types.h>
 
 using namespace std;
 
-const int COLUMN_USERNAME_SIZE = 32;
-const int COLUMN_EMAIL_SIZE = 255;
+const uint32_t COLUMN_USERNAME_SIZE = 32;
+const uint32_t COLUMN_EMAIL_SIZE = 255;
 
 enum class ExecuteResult {
   EXECUTE_TABLE_FULL,
@@ -39,62 +39,58 @@ enum class PrepareResult {
 
 enum class StatementType { STATEMENT_INSERT, STATEMENT_SELECT };
 
-enum class NodeType { NODE_INTERNAL, NODE_LEAF };
+// Explicitly 1 byte wide so it maps directly to our node header byte!
+enum class NodeType : uint8_t { NODE_INTERNAL, NODE_LEAF };
 
-struct Row {
-  u_int32_t id;
-  char username[COLUMN_USERNAME_SIZE];
-  char email[COLUMN_EMAIL_SIZE];
-};
+// ============================================================================
+// LAYOUT CONSTANTS
+// ============================================================================
+const uint32_t ID_SIZE = sizeof(uint32_t);
+const uint32_t USERNAME_SIZE = COLUMN_USERNAME_SIZE;
+const uint32_t EMAIL_SIZE = COLUMN_EMAIL_SIZE;
+const uint32_t ID_OFFSET = 0;
+const uint32_t USERNAME_OFFSET = ID_OFFSET + ID_SIZE;
+const uint32_t EMAIL_OFFSET = USERNAME_OFFSET + USERNAME_SIZE;
+const uint32_t ROW_SIZE = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
 
-struct Statement {
-  StatementType type;
-  Row row_to_insert;
-};
+const uint32_t PAGE_SIZE = 4096;
+const uint32_t TABLE_MAX_PAGES = 100;
 
-// compact representation of a row
-const u_int32_t ID_SIZE = sizeof(Row::id);
-const u_int32_t USERNAME_SIZE = sizeof(Row::username);
-const u_int32_t EMAIL_SIZE = sizeof(Row::email);
-const u_int32_t ID_OFFSET = 0;
-const u_int32_t USERNAME_OFFSET = ID_OFFSET + ID_SIZE;
-const u_int32_t EMAIL_OFFSET = USERNAME_OFFSET + USERNAME_SIZE;
-const u_int32_t ROW_SIZE = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
-
-const u_int32_t PAGE_SIZE = 4096;
-const int TABLE_MAX_PAGES = 100;
-
-// common node header layout
-const u_int32_t NODE_TYPE_SIZE = sizeof(uint8_t);
-const u_int32_t NODE_TYPE_OFFSET = 0;
-const u_int32_t IS_ROOT_SIZE = sizeof(uint8_t);
-const u_int32_t IS_ROOT_OFFSET = NODE_TYPE_SIZE;
-const u_int32_t PARENT_POINTER_SIZE = sizeof(uint32_t);
-const u_int32_t PARENT_POINTER_OFFSET = IS_ROOT_OFFSET + IS_ROOT_SIZE;
-const u_int32_t COMMON_NODE_HEADER_SIZE =
+// Common Node Header Layout
+const uint32_t NODE_TYPE_SIZE = sizeof(uint8_t);
+const uint32_t NODE_TYPE_OFFSET = 0;
+const uint32_t IS_ROOT_SIZE = sizeof(uint8_t);
+const uint32_t IS_ROOT_OFFSET = NODE_TYPE_SIZE;
+const uint32_t PARENT_POINTER_SIZE = sizeof(uint32_t);
+const uint32_t PARENT_POINTER_OFFSET = IS_ROOT_OFFSET + IS_ROOT_SIZE;
+const uint32_t COMMON_NODE_HEADER_SIZE =
     NODE_TYPE_SIZE + IS_ROOT_SIZE + PARENT_POINTER_SIZE;
 
-// leaf node header layout
-const u_int32_t LEAF_NODE_NUM_CELLS_SIZE = sizeof(uint32_t);
-const u_int32_t LEAF_NODE_NUM_CELLS_OFFSET = COMMON_NODE_HEADER_SIZE;
-const u_int32_t LEAF_NODE_HEADER_SIZE =
-    COMMON_NODE_HEADER_SIZE + LEAF_NODE_NUM_CELLS_SIZE;
+// Leaf Node Header Layout
+const uint32_t LEAF_NODE_NUM_CELLS_SIZE = sizeof(uint32_t);
+const uint32_t LEAF_NODE_NUM_CELLS_OFFSET = COMMON_NODE_HEADER_SIZE;
+const uint32_t LEAF_NODE_NEXT_LEAF_SIZE = sizeof(uint32_t);
+const uint32_t LEAF_NODE_NEXT_LEAF_OFFSET = 
+    LEAF_NODE_NUM_CELLS_SIZE + LEAF_NODE_NUM_CELLS_OFFSET;
+const uint32_t LEAF_NODE_HEADER_SIZE = COMMON_NODE_HEADER_SIZE + 
+                                       LEAF_NODE_NUM_CELLS_SIZE +
+                                       LEAF_NODE_NEXT_LEAF_SIZE;
 
-// leaf node body layout
-const u_int32_t LEAF_NODE_KEY_SIZE = sizeof(u_int32_t);
-const u_int32_t LEAF_NODE_KEY_OFFSET = 0;
-const u_int32_t LEAF_NODE_VALUE_SIZE = ROW_SIZE;
-const u_int32_t LEAF_NODE_VALUE_OFFSET =
+// Leaf Node Body Layout
+const uint32_t LEAF_NODE_KEY_SIZE = sizeof(uint32_t);
+const uint32_t LEAF_NODE_KEY_OFFSET = 0;
+const uint32_t LEAF_NODE_VALUE_SIZE = ROW_SIZE;
+const uint32_t LEAF_NODE_VALUE_OFFSET =
     LEAF_NODE_KEY_OFFSET + LEAF_NODE_KEY_SIZE;
-const u_int32_t LEAF_NODE_CELL_SIZE = LEAF_NODE_KEY_SIZE + LEAF_NODE_VALUE_SIZE;
-const u_int32_t LEAF_NODE_SPACE_FOR_CELLS = PAGE_SIZE - LEAF_NODE_HEADER_SIZE;
-const u_int32_t LEAF_NODE_MAX_CELLS =
+const uint32_t LEAF_NODE_CELL_SIZE = LEAF_NODE_KEY_SIZE + LEAF_NODE_VALUE_SIZE;
+const uint32_t LEAF_NODE_SPACE_FOR_CELLS = PAGE_SIZE - LEAF_NODE_HEADER_SIZE;
+const uint32_t LEAF_NODE_MAX_CELLS =
     LEAF_NODE_SPACE_FOR_CELLS / LEAF_NODE_CELL_SIZE;
-const u_int32_t LEAF_NODE_RIGHT_SPLIT_COUNT = (LEAF_NODE_MAX_CELLS + 1) / 2;
-const u_int32_t LEAF_NODE_LEFT_SPLIT_COUNT =
+const uint32_t LEAF_NODE_RIGHT_SPLIT_COUNT = (LEAF_NODE_MAX_CELLS + 1) / 2;
+const uint32_t LEAF_NODE_LEFT_SPLIT_COUNT =
     (LEAF_NODE_MAX_CELLS + 1) - LEAF_NODE_RIGHT_SPLIT_COUNT;
 
-// Internal Node header layout
+// Internal Node Header Layout
 const uint32_t INTERNAL_NODE_NUM_KEYS_SIZE = sizeof(uint32_t);
 const uint32_t INTERNAL_NODE_NUM_KEYS_OFFSET = COMMON_NODE_HEADER_SIZE;
 const uint32_t INTERNAL_NODE_RIGHT_CHILD_SIZE = sizeof(uint32_t);
@@ -104,90 +100,661 @@ const uint32_t INTERNAL_NODE_HEADER_SIZE = COMMON_NODE_HEADER_SIZE +
                                            INTERNAL_NODE_NUM_KEYS_SIZE +
                                            INTERNAL_NODE_RIGHT_CHILD_SIZE;
 
-// Interanl Node body layout
+// Internal Node Body Layout
 const uint32_t INTERNAL_NODE_KEY_SIZE = sizeof(uint32_t);
 const uint32_t INTERNAL_NODE_CHILD_SIZE = sizeof(uint32_t);
 const uint32_t INTERNAL_NODE_CELL_SIZE =
     INTERNAL_NODE_KEY_SIZE + INTERNAL_NODE_CHILD_SIZE;
 
-struct Pager {
-  FILE *fileDescriptor;
-  long fileLength;
-  u_int32_t numPages;
-  void *pages[TABLE_MAX_PAGES];
+// ============================================================================
+// 1. ROW: Encapsulates row data and its binary serialization
+// ============================================================================
+struct Row {
+  uint32_t id = 0;
+  char username[COLUMN_USERNAME_SIZE]{};
+  char email[COLUMN_EMAIL_SIZE]{};
+
+  void serialize(uint8_t *dest) const {
+    memcpy(dest + ID_OFFSET, &id, ID_SIZE);
+    memcpy(dest + USERNAME_OFFSET, username, USERNAME_SIZE);
+    memcpy(dest + EMAIL_OFFSET, email, EMAIL_SIZE);
+  }
+
+  void deserialize(const uint8_t *src) {
+    memcpy(&id, src + ID_OFFSET, ID_SIZE);
+    memcpy(username, src + USERNAME_OFFSET, USERNAME_SIZE);
+    memcpy(email, src + EMAIL_OFFSET, EMAIL_SIZE);
+  }
+
+  void print() const {
+    cout << "(" << id << ", " << username << ", " << email << ")" << endl;
+  }
 };
 
-struct Table {
-  Pager *pager;
-  u_int32_t rootPageNum;
+struct Statement {
+  StatementType type;
+  Row row_to_insert;
 };
 
-struct Cursor {
+// ============================================================================
+// 2. PAGER: Owns the disk file and 4KB memory pages (RAII)
+// ============================================================================
+class Pager {
+private:
+  FILE *fileDescriptor = nullptr;
+  long fileLength = 0;
+  uint32_t numPages = 0;
+  uint8_t *pages[TABLE_MAX_PAGES]{}; // Brace init sets all pointers to nullptr
+
+public:
+  explicit Pager(const char *filename) {
+    fileDescriptor = fopen(filename, "r+b");
+    if (fileDescriptor == nullptr) {
+      fileDescriptor = fopen(filename, "w+b");
+    }
+    if (fileDescriptor == nullptr) {
+      cerr << "Unable to open file\n";
+      exit(EXIT_FAILURE);
+    }
+
+    fseek(fileDescriptor, 0, SEEK_END);
+    fileLength = ftell(fileDescriptor);
+    fseek(fileDescriptor, 0, SEEK_SET);
+
+    if (fileLength % PAGE_SIZE != 0) {
+      cout << "DB file is not a whole number of pages. Corrupt file." << endl;
+      exit(EXIT_FAILURE);
+    }
+
+    numPages = fileLength / PAGE_SIZE;
+  }
+
+  ~Pager() {
+    for (uint32_t i = 0; i < numPages; i++) {
+      if (pages[i] != nullptr) {
+        flush(i);
+        delete[] pages[i];
+        pages[i] = nullptr;
+      }
+    }
+
+    if (fclose(fileDescriptor) == -1) {
+      cout << "Error closing db file\n";
+      exit(EXIT_FAILURE);
+    }
+
+    for (uint32_t i = 0; i < TABLE_MAX_PAGES; i++) {
+      if (pages[i] != nullptr) {
+        delete[] pages[i];
+        pages[i] = nullptr;
+      }
+    }
+  }
+
+  uint8_t *getPage(uint32_t pageNum) {
+    if (pageNum >= TABLE_MAX_PAGES) {
+      cout << "Tried to fetch page number out of bounds. " << pageNum
+           << " >= " << TABLE_MAX_PAGES << endl;
+      exit(EXIT_FAILURE);
+    }
+
+    if (pages[pageNum] == nullptr) {
+      uint8_t *page = new uint8_t[PAGE_SIZE]();
+      uint32_t savedPages = fileLength / PAGE_SIZE;
+
+      if (pageNum < savedPages) {
+        fseek(fileDescriptor, pageNum * PAGE_SIZE, SEEK_SET);
+        size_t bytesRead = fread(page, 1, PAGE_SIZE, fileDescriptor);
+        (void)bytesRead;
+      }
+
+      pages[pageNum] = page;
+
+      if (pageNum >= numPages) {
+        numPages = pageNum + 1;
+      }
+    }
+
+    return pages[pageNum];
+  }
+
+  void flush(uint32_t pageNum) {
+    if (pages[pageNum] == nullptr) {
+      cout << "Tried to flush null\n";
+      exit(EXIT_FAILURE);
+    }
+    fseek(fileDescriptor, pageNum * PAGE_SIZE, SEEK_SET);
+    fwrite(pages[pageNum], 1, PAGE_SIZE, fileDescriptor);
+  }
+
+  uint32_t getNumPages() const { return numPages; }
+  uint32_t getUnusedPageNum() const { return numPages; }
+};
+
+// ============================================================================
+// 3. B-TREE NODE VIEW CLASSES: Encapsulate all byte-offset pointer arithmetic
+// ============================================================================
+
+// Base class representing the 6-byte Common Node Header shared by all nodes
+class Node {
+protected:
+  uint8_t *data; // Non-owning pointer to a 4KB page inside Pager
+
+public:
+  explicit Node(uint8_t *pageData) : data(pageData) {}
+
+  uint8_t *raw() const { return data; }
+
+  NodeType getType() const {
+    return static_cast<NodeType>(data[NODE_TYPE_OFFSET]);
+  }
+
+  void setType(NodeType type) {
+    data[NODE_TYPE_OFFSET] = static_cast<uint8_t>(type);
+  }
+
+  bool isRoot() const { return static_cast<bool>(data[IS_ROOT_OFFSET]); }
+
+  void setRoot(bool root) { data[IS_ROOT_OFFSET] = static_cast<uint8_t>(root); }
+
+  // Useful for upcoming B+ Tree chapters when you need parent pointers!
+  uint32_t &parent() {
+    return *reinterpret_cast<uint32_t *>(data + PARENT_POINTER_OFFSET);
+  }
+};
+
+// Derived view for Leaf Nodes
+class LeafNode : public Node {
+public:
+  explicit LeafNode(uint8_t *pageData) : Node(pageData) {}
+
+  void initialize() {
+    setType(NodeType::NODE_LEAF);
+    setRoot(false);
+    numCells() = 0;
+    nextLeaf() = 0;
+  }
+
+  uint32_t &numCells() {
+    return *reinterpret_cast<uint32_t *>(data + LEAF_NODE_NUM_CELLS_OFFSET);
+  }
+
+  uint8_t *cell(uint32_t cellNum) {
+    return data + LEAF_NODE_HEADER_SIZE + (cellNum * LEAF_NODE_CELL_SIZE);
+  }
+
+  uint32_t &key(uint32_t cellNum) {
+    return *reinterpret_cast<uint32_t *>(cell(cellNum));
+  }
+
+  uint8_t *value(uint32_t cellNum) {
+    return cell(cellNum) + LEAF_NODE_KEY_SIZE;
+  }
+
+  uint32_t getMaxKey() { return key(numCells() - 1); }
+
+  uint32_t &nextLeaf() {
+    return *reinterpret_cast<uint32_t *>(data + LEAF_NODE_NEXT_LEAF_OFFSET);
+  }
+};
+
+// Derived view for Internal Nodes
+class InternalNode : public Node {
+public:
+  explicit InternalNode(uint8_t *pageData) : Node(pageData) {}
+
+  void initialize() {
+    setType(NodeType::NODE_INTERNAL);
+    setRoot(false);
+    numKeys() = 0;
+  }
+
+  uint32_t &numKeys() {
+    return *reinterpret_cast<uint32_t *>(data + INTERNAL_NODE_NUM_KEYS_OFFSET);
+  }
+
+  uint32_t &rightChild() {
+    return *reinterpret_cast<uint32_t *>(data +
+                                         INTERNAL_NODE_RIGHT_CHILD_OFFSET);
+  }
+
+  uint8_t *cell(uint32_t cellNum) {
+    return data + INTERNAL_NODE_HEADER_SIZE +
+           (cellNum * INTERNAL_NODE_CELL_SIZE);
+  }
+
+  uint32_t &child(uint32_t childNum) {
+    uint32_t keys = numKeys();
+    if (childNum > keys) {
+      cout << "Tried to access childNum " << childNum << " > numKeys " << keys
+           << endl;
+      exit(EXIT_FAILURE);
+    } else if (childNum == keys) {
+      return rightChild();
+    } else {
+      return *reinterpret_cast<uint32_t *>(cell(childNum));
+    }
+  }
+
+  // Fixed pointer math: cell(keyNum) is uint8_t*, so + INTERNAL_NODE_CHILD_SIZE
+  // moves forward by exactly 4 bytes!
+  uint32_t &key(uint32_t keyNum) {
+    return *reinterpret_cast<uint32_t *>(cell(keyNum) +
+                                         INTERNAL_NODE_CHILD_SIZE);
+  }
+
+  uint32_t getMaxKey() { return key(numKeys() - 1); }
+};
+
+// Helper to get the max key of any page regardless of whether it's Leaf or
+// Internal
+uint32_t getNodeMaxKey(uint8_t *pageData) {
+  Node node(pageData);
+  if (node.getType() == NodeType::NODE_INTERNAL) {
+    return InternalNode(pageData).getMaxKey();
+  } else {
+    return LeafNode(pageData).getMaxKey();
+  }
+}
+
+// ============================================================================
+// 4. CURSOR & TABLE CLASSES: Manage B+ Tree traversal, splitting, and roots
+// ============================================================================
+
+class Table; // Forward declaration so Cursor knows Table exists
+
+class Cursor {
+public:
   Table *table;
-  u_int32_t pageNum;
-  u_int32_t cellNum;
+  uint32_t pageNum;
+  uint32_t cellNum;
   bool endOfTable;
+
+  Cursor(Table *tbl, uint32_t pg, uint32_t cell, bool end = false)
+      : table(tbl), pageNum(pg), cellNum(cell), endOfTable(end) {}
+
+  uint8_t *value();
+  void advance();
+  void insert(uint32_t key, const Row &row);
+
+private:
+  void splitAndInsert(uint32_t key, const Row &row);
 };
 
-// function declarations
+class Table {
+public:
+  Pager *pager;
+  uint32_t rootPageNum;
 
-void printPrompt();
-void readInputBuffer(string &inputBuffer);
-MetaCommandResult doMetaCommand(string &inputBuffer, Table *table);
-PrepareResult prepareStatement(string inputBuffer, Statement *statement);
-ExecuteResult executeStatement(Statement *statement, Table *table);
-ExecuteResult executeInsert(Statement *statement, Table *table);
-ExecuteResult executeSelect(Statement *statement, Table *table);
-void printRow(Row *row);
-void serializeRow(Row *src, void *dest);
-void deserializeRow(void *src, Row *dest);
-void *cursorValue(Cursor *cursor);
-Table *openDB(const char *filename);
-void pagerFlush(Pager *pager, int pageNum);
-long getFileSize(const char *filename);
-Pager *pagerOpen(const char *filename);
-void *getPage(Pager *pager, int pageNum);
-void dbClose(Table *table);
-Cursor *tableStart(Table *table);
-void cursorAdvance(Cursor *cursor);
-u_int32_t *leafNodeNumCells(void *node);
-void *leafNodeCell(void *node, u_int32_t cellNum);
-u_int32_t *leafNodeKey(void *node, u_int32_t cellNum);
-void *leafNodeValue(void *node, u_int32_t cellNum);
-void initializeLeafNode(void *node);
-void leafNodeInsert(Cursor *cursor, u_int32_t key, Row *value);
-void printConstants();
-Cursor *tableFind(Table *table, u_int32_t key);
-Cursor *leafNodeFind(Table *table, u_int32_t pageNum, u_int32_t key);
-NodeType getNodeType(void *node);
-void setNodeType(void *node, NodeType type);
-void leafNodeSplitAndInsert(Cursor *cursor, u_int32_t key, Row *value);
-u_int32_t getUnusedPageNum(Pager *pager);
-void setNodeRoot(void *node, bool isRoot);
-bool isNodeRoot(void *node);
-void initializeInternalNode(void *node);
-uint32_t getNodeMaxKey(void *node);
-uint32_t *internalNodeKey(void *node, uint32_t keyNum);
-u_int32_t *internalNodeChild(void *node, uint32_t childNum);
-uint32_t *internalNodeCell(void *node, uint32_t cellNum);
-uint32_t *internalNodeRightChild(void *node);
-uint32_t *internalNodeNumKeys(void *node);
-void createNewRoot(Table *table, uint32_t rightChildPageNum);
-void printTree(Pager *pager, uint32_t pageNum, uint32_t indentationLevel);
+  // Constructor replaces openDB()
+  explicit Table(const char *filename) {
+    pager = new Pager(filename);
+    rootPageNum = 0;
 
+    if (pager->getNumPages() == 0) {
+      // Database file is brand new. Initialize page 0 as a root leaf node.
+      LeafNode rootNode(pager->getPage(0));
+      rootNode.initialize();
+      rootNode.setRoot(true);
+    }
+  }
+
+  // Destructor replaces dbClose()! Deleting pager triggers ~Pager()
+  // automatically.
+  ~Table() { delete pager; }
+
+  // Replaces tableStart() - returns Cursor by value (no 'new' or memory leaks!)
+  Cursor start() {
+    Cursor cursor = find(0);
+    LeafNode leafNode(pager->getPage(cursor.pageNum));
+    uint32_t numCells = leafNode.numCells();
+    cursor.endOfTable = (numCells == 0);
+    return cursor;
+  }
+
+  // Replaces tableFind()
+  Cursor find(uint32_t key) {
+    uint8_t *rootPage = pager->getPage(rootPageNum);
+    Node rootNode(rootPage);
+
+    if (rootNode.getType() == NodeType::NODE_LEAF) {
+      return findInLeaf(rootPageNum, key);
+    } else {
+      return findInInternal(rootPageNum, key);
+    }
+  }
+
+  // Replaces createNewRoot()
+  void createNewRoot(uint32_t rightChildPageNum) {
+    uint8_t *rootPage = pager->getPage(rootPageNum);
+    uint32_t leftChildPageNum = pager->getUnusedPageNum();
+    uint8_t *leftChildPage = pager->getPage(leftChildPageNum);
+
+    // Copy old root data into leftChildPage
+    memcpy(leftChildPage, rootPage, PAGE_SIZE);
+    Node leftChild(leftChildPage);
+    leftChild.setRoot(false);
+
+    // Re-initialize root page as an Internal Node with 1 key and 2 children
+    InternalNode rootNode(rootPage);
+    rootNode.initialize();
+    rootNode.setRoot(true);
+    rootNode.numKeys() = 1;
+    rootNode.child(0) = leftChildPageNum;
+    rootNode.key(0) = getNodeMaxKey(leftChildPage);
+    rootNode.rightChild() = rightChildPageNum;
+  }
+
+  void printTree(uint32_t pageNum = 0, uint32_t indentationLevel = 0) {
+    uint8_t *page = pager->getPage(pageNum);
+    Node node(page);
+
+    if (node.getType() == NodeType::NODE_LEAF) {
+      LeafNode leaf(page);
+      uint32_t numKeys = leaf.numCells();
+      indent(indentationLevel);
+      cout << "- leaf (size " << numKeys << ")" << endl;
+      for (uint32_t i = 0; i < numKeys; i++) {
+        indent(indentationLevel + 1);
+        cout << "- " << leaf.key(i) << endl;
+      }
+    } else {
+      InternalNode internal(page);
+      uint32_t numKeys = internal.numKeys();
+      indent(indentationLevel);
+      cout << "- internal (size " << numKeys << ")" << endl;
+      for (uint32_t i = 0; i < numKeys; i++) {
+        printTree(internal.child(i), indentationLevel + 1);
+        indent(indentationLevel + 1);
+        cout << "- key " << internal.key(i) << endl;
+      }
+      printTree(internal.rightChild(), indentationLevel + 1);
+    }
+  }
+
+private:
+  static void indent(uint32_t level) {
+    for (uint32_t i = 0; i < level; i++) {
+      cout << "  ";
+    }
+  }
+
+  // Replaces leafNodeFind()
+  Cursor findInLeaf(uint32_t pageNum, uint32_t key) {
+    LeafNode node(pager->getPage(pageNum));
+    uint32_t numCells = node.numCells();
+
+    uint32_t minIndex = 0;
+    uint32_t onePastMaxIndex = numCells;
+
+    while (onePastMaxIndex != minIndex) {
+      uint32_t index = (minIndex + onePastMaxIndex) / 2;
+      uint32_t keyAtIndex = node.key(index);
+      if (key == keyAtIndex) {
+        return Cursor(this, pageNum, index);
+      } else if (key < keyAtIndex) {
+        onePastMaxIndex = index;
+      } else {
+        minIndex = index + 1;
+      }
+    }
+
+    return Cursor(this, pageNum, minIndex);
+  }
+
+  Cursor findInInternal( uint32_t pageNum, uint32_t key) {
+    InternalNode node(pager->getPage(pageNum));
+    uint32_t numKeys = node.numKeys();
+
+    /* Binary search to find index of child to search*/
+    uint32_t minIndex = 0;
+    uint32_t maxIndex = numKeys;
+
+    while(minIndex != maxIndex) {
+      uint32_t midIndex = (minIndex + maxIndex) / 2;
+      uint32_t keyToRight = node.key(midIndex);
+
+      if(keyToRight >= key) {
+        maxIndex = midIndex;
+      } else {
+        minIndex = midIndex + 1;
+      }
+    }
+
+    uint32_t childNum = node.child(minIndex);
+    Node child(pager->getPage(childNum));
+
+    switch (child.getType()) {
+      case NodeType::NODE_LEAF:
+        return findInLeaf(childNum, key);
+      case NodeType::NODE_INTERNAL:
+        return findInInternal(childNum, key);
+    }
+
+    return Cursor(this, pageNum, minIndex);
+  }
+};
+
+// ============================================================================
+// CURSOR METHOD IMPLEMENTATIONS
+// ============================================================================
+
+inline uint8_t *Cursor::value() {
+  LeafNode node(table->pager->getPage(pageNum));
+  return node.value(cellNum);
+}
+
+inline void Cursor::advance() {
+  LeafNode node(table->pager->getPage(pageNum));
+  cellNum++;
+  if(cellNum >= node.numCells()) {
+    uint32_t nextPageNum = node.nextLeaf();
+    if(nextPageNum == 0) {
+      // this was rightmost leaf
+      endOfTable = true;
+    } else {
+      pageNum = nextPageNum;
+      cellNum = 0;
+    }
+  }
+}
+
+// Replaces leafNodeInsert()
+inline void Cursor::insert(uint32_t key, const Row &row) {
+  LeafNode node(table->pager->getPage(pageNum));
+  uint32_t numCells = node.numCells();
+
+  if (numCells >= LEAF_NODE_MAX_CELLS) {
+    splitAndInsert(key, row);
+    return;
+  }
+
+  if (cellNum < numCells) {
+    for (uint32_t i = numCells; i > cellNum; i--) {
+      memcpy(node.cell(i), node.cell(i - 1), LEAF_NODE_CELL_SIZE);
+    }
+  }
+
+  node.numCells() += 1;
+  node.key(cellNum) = key;
+  row.serialize(node.value(cellNum));
+}
+
+// Replaces leafNodeSplitAndInsert()
+inline void Cursor::splitAndInsert(uint32_t key, const Row &row) {
+  LeafNode oldNode(table->pager->getPage(pageNum));
+  uint32_t newPageNum = table->pager->getUnusedPageNum();
+  uint32_t rootPageNum = table->rootPageNum;
+  LeafNode newNode(table->pager->getPage(newPageNum));
+  newNode.initialize();
+  newNode.nextLeaf() = oldNode.nextLeaf();
+  oldNode.nextLeaf() = newPageNum;
+
+  for (int32_t i = LEAF_NODE_MAX_CELLS; i >= 0; i--) {
+    LeafNode &destNode = (i >= static_cast<int32_t>(LEAF_NODE_LEFT_SPLIT_COUNT))
+                             ? newNode
+                             : oldNode;
+    uint32_t indexWithinNode = i % LEAF_NODE_LEFT_SPLIT_COUNT;
+
+    if (i == static_cast<int32_t>(cellNum)) {
+      row.serialize(destNode.value(indexWithinNode));
+      destNode.key(indexWithinNode) = key;
+    } else if (i > static_cast<int32_t>(cellNum)) {
+      memcpy(destNode.cell(indexWithinNode), oldNode.cell(i - 1),
+             LEAF_NODE_CELL_SIZE);
+    } else {
+      memcpy(destNode.cell(indexWithinNode), oldNode.cell(i),
+             LEAF_NODE_CELL_SIZE);
+    }
+  }
+
+  oldNode.numCells() = LEAF_NODE_LEFT_SPLIT_COUNT;
+  newNode.numCells() = LEAF_NODE_RIGHT_SPLIT_COUNT;
+
+  if (oldNode.isRoot()) {
+    table->createNewRoot(newPageNum);
+  } else {
+    cout << "Need to implement upadting parent after split" << endl;
+    exit(EXIT_FAILURE);
+  }
+}
+
+// ============================================================================
+// REPL & EXECUTION FUNCTIONS
+// ============================================================================
+void printPrompt() { cout << "^_^ : "; }
+
+void readInputBuffer(string &inputBuffer) {
+  getline(cin, inputBuffer);
+  if (inputBuffer.length() <= 0) {
+    cout << "\nError reading input\n";
+    exit(EXIT_FAILURE);
+  }
+}
+
+MetaCommandResult doMetaCommand(string &inputBuffer, Table *table) {
+  if (inputBuffer == ".exit") {
+    delete table; // Triggers Pager destructor, flushes pages, and closes file
+                  // cleanly
+    cout << "Exiting...\nMeowwww angyyyyy!\n😾😾😾😾😾\n";
+    exit(EXIT_SUCCESS);
+  } else if (inputBuffer == ".btree") {
+    cout << "Tree: \n";
+    table->printTree(table->rootPageNum, 0);
+    return MetaCommandResult::META_COMMAND_SUCCESS;
+  } else if (inputBuffer == ".constants") {
+    cout << "Constants: \n";
+    cout << "ROW_SIZE: " << ROW_SIZE << endl;
+    cout << "COMMON_NODE_HEADER_SIZE: " << COMMON_NODE_HEADER_SIZE << endl;
+    cout << "LEAF_NODE_HEADER_SIZE: " << LEAF_NODE_HEADER_SIZE << endl;
+    cout << "LEAF_NODE_CELL_SIZE: " << LEAF_NODE_CELL_SIZE << endl;
+    cout << "LEAF_NODE_SPACE_FOR_CELLS: " << LEAF_NODE_SPACE_FOR_CELLS << endl;
+    cout << "LEAF_NODE_MAX_CELLS: " << LEAF_NODE_MAX_CELLS << endl;
+    return MetaCommandResult::META_COMMAND_SUCCESS;
+  } else {
+    return MetaCommandResult::META_COMMAND_UNRECOGNIZED_COMMAND;
+  }
+}
+
+PrepareResult prepareStatement(string inputBuffer, Statement *statement) {
+  string command;
+  stringstream ss(inputBuffer);
+  ss >> command;
+
+  if (command == "insert") {
+    statement->type = StatementType::STATEMENT_INSERT;
+    int id;
+    string usernameStr, emailStr;
+    if (ss >> id >> usernameStr >> emailStr) {
+      if (usernameStr.length() >= COLUMN_USERNAME_SIZE) {
+        return PrepareResult::PREPARE_STRING_TOO_LONG;
+      }
+      if (emailStr.length() >= COLUMN_EMAIL_SIZE) {
+        return PrepareResult::PREPARE_STRING_TOO_LONG;
+      }
+      if (id < 0) {
+        return PrepareResult::PREPARE_NEGATIVE_ID;
+      }
+
+      statement->row_to_insert.id = static_cast<uint32_t>(id);
+      strcpy(statement->row_to_insert.username, usernameStr.c_str());
+      strcpy(statement->row_to_insert.email, emailStr.c_str());
+      return PrepareResult::PREPARE_SUCCESS;
+    } else {
+      return PrepareResult::PREPARE_SYNTAX_ERROR;
+    }
+  } else if (command == "select") {
+    statement->type = StatementType::STATEMENT_SELECT;
+    return PrepareResult::PREPARE_SUCCESS;
+  }
+
+  return PrepareResult::PREPARE_UNRECOGNIZED_STATEMENT;
+}
+
+ExecuteResult executeInsert(Statement *statement, Table *table) {
+  Row &rowToInsert = statement->row_to_insert;
+  uint32_t keyToInsert = rowToInsert.id;
+  Cursor cursor = table->find(keyToInsert);
+
+  LeafNode node(table->pager->getPage(cursor.pageNum));
+  if (cursor.cellNum < node.numCells()) {
+    if (node.key(cursor.cellNum) == keyToInsert) {
+      return ExecuteResult::EXECUTE_DUPLICATE_KEY;
+    }
+  }
+
+  cursor.insert(keyToInsert, rowToInsert);
+  cout << "\nInserted 1 row succesfully!" << endl;
+  return ExecuteResult::EXECUTE_SUCCESS;
+}
+
+ExecuteResult executeSelect(Statement *statement, Table *table) {
+  Cursor cursor = table->start();
+  Row row;
+  uint32_t count = 0;
+
+  cout << endl;
+  while (!cursor.endOfTable) {
+    row.deserialize(cursor.value());
+    row.print();
+    cursor.advance();
+    count++;
+  }
+  cout << "\n" << count << " rows projected!" << endl;
+  return ExecuteResult::EXECUTE_SUCCESS;
+}
+
+ExecuteResult executeStatement(Statement *statement, Table *table) {
+  switch (statement->type) {
+  case StatementType::STATEMENT_INSERT:
+    return executeInsert(statement, table);
+  case StatementType::STATEMENT_SELECT:
+    return executeSelect(statement, table);
+  default:
+    return ExecuteResult::EXECUTE_UNSUPPORTED_COMMAND;
+  }
+}
+
+// ============================================================================
+// MAIN REPL LOOP
+// ============================================================================
 int main(int argc, char *argv[]) {
   if (argc < 2) {
     cerr << "Must supply a database filename\n";
     exit(EXIT_FAILURE);
   }
+
   const char *filename = argv[1];
-  Table *table = openDB(filename);
+  Table *table = new Table(filename);
   string inputBuffer = "";
+
   while (true) {
     cout << endl;
-
     printPrompt();
     readInputBuffer(inputBuffer);
+
+    if (inputBuffer.empty())
+      continue;
 
     if (inputBuffer[0] == '.') {
       switch (doMetaCommand(inputBuffer, table)) {
@@ -227,585 +794,12 @@ int main(int argc, char *argv[]) {
     case ExecuteResult::EXECUTE_TABLE_FULL:
       cout << "\nError: Table full! Meow" << endl;
       break;
-    }
-  }
-}
-
-void printPrompt() { cout << "^_^ : "; }
-
-void readInputBuffer(string &inputBuffer) {
-  getline(cin, inputBuffer);
-
-  if (inputBuffer.length() <= 0) {
-    cout << "\nError reading input\n";
-    exit(EXIT_FAILURE);
-  }
-}
-
-MetaCommandResult doMetaCommand(string &inputBuffer, Table *table) {
-  if (inputBuffer == ".exit") {
-    dbClose(table);
-    cout << "Exiting..." << endl;
-    cout << "Meowwww angyyyyy!" << endl;
-    cout << "😾😾😾😾😾\n";
-    exit(EXIT_SUCCESS);
-  } else if (inputBuffer == ".btree") {
-    cout << "Tree: " << endl;
-    printTree(table->pager, 0, 0);
-    return MetaCommandResult::META_COMMAND_SUCCESS;
-  } else if (inputBuffer == ".constants") {
-    cout << "Constants: " << endl;
-    printConstants();
-    return MetaCommandResult::META_COMMAND_SUCCESS;
-  } else {
-    return MetaCommandResult::META_COMMAND_UNRECOGNIZED_COMMAND;
-  }
-}
-
-PrepareResult prepareStatement(string inputBuffer, Statement *statement) {
-  int id;
-  char username[COLUMN_USERNAME_SIZE];
-  char email[COLUMN_EMAIL_SIZE];
-  string command;
-  stringstream ss(inputBuffer);
-  ss >> command;
-
-  if (command == "insert") {
-    statement->type = StatementType::STATEMENT_INSERT;
-    if (ss >> id >> username >> email) {
-      if ((strlen(username) > COLUMN_USERNAME_SIZE) ||
-          (strlen(email) > COLUMN_EMAIL_SIZE)) {
-        return PrepareResult::PREPARE_STRING_TOO_LONG;
-      }
-
-      if (id < 0) {
-        return PrepareResult::PREPARE_NEGATIVE_ID;
-      }
-
-      statement->row_to_insert.id = id;
-      strcpy(statement->row_to_insert.email, email);
-      strcpy(statement->row_to_insert.username, username);
-      return PrepareResult::PREPARE_SUCCESS;
-    } else {
-      return PrepareResult::PREPARE_UNRECOGNIZED_STATEMENT;
-    }
-  } else if (command == "select") {
-    statement->type = StatementType::STATEMENT_SELECT;
-    return PrepareResult::PREPARE_SUCCESS;
-  }
-
-  return PrepareResult::PREPARE_UNRECOGNIZED_STATEMENT;
-}
-
-ExecuteResult executeInsert(Statement *statement, Table *table) {
-  void *node = getPage(table->pager, table->rootPageNum);
-  u_int32_t numCells = *(leafNodeNumCells(node));
-
-  Row *rowToInsert = &(statement->row_to_insert);
-  u_int32_t keyToInsert = rowToInsert->id;
-  Cursor *cursor = tableFind(table, keyToInsert);
-
-  if (cursor->cellNum < numCells) {
-    u_int32_t keyAtIndex = *leafNodeKey(node, cursor->cellNum);
-    if (keyAtIndex == keyToInsert) {
-      return ExecuteResult::EXECUTE_DUPLICATE_KEY;
+    case ExecuteResult::EXECUTE_UNSUPPORTED_COMMAND:
+      cout << "\nError: Unsupported command.\n";
+      break;
     }
   }
 
-  leafNodeInsert(cursor, rowToInsert->id, rowToInsert);
-
-  cout << endl;
-  cout << "Inserted 1 row succesfully!" << endl;
-
-  delete cursor;
-
-  return ExecuteResult::EXECUTE_SUCCESS;
-}
-
-ExecuteResult executeSelect(Statement *statement, Table *table) {
-  Cursor *cursor = tableStart(table);
-  Row row;
-  void *node = getPage(table->pager, table->rootPageNum);
-  u_int32_t numCells = *(leafNodeNumCells(node));
-
-  cout << endl;
-
-  for (u_int32_t i = 0; i < numCells; i++) {
-    deserializeRow(cursorValue(cursor), &row);
-    printRow(&row);
-    cursorAdvance(cursor);
-  }
-  cout << endl;
-  cout << numCells << " rows projected!" << endl;
-
-  delete cursor;
-
-  return ExecuteResult::EXECUTE_SUCCESS;
-}
-
-void printRow(Row *row) {
-  cout << "(" << row->id << ", " << row->username << ", " << row->email << ")"
-       << endl;
-}
-
-ExecuteResult executeStatement(Statement *statement, Table *table) {
-  switch (statement->type) {
-  case StatementType::STATEMENT_INSERT:
-    return executeInsert(statement, table);
-  case StatementType::STATEMENT_SELECT:
-    return executeSelect(statement, table);
-  default:
-    return ExecuteResult::EXECUTE_UNSUPPORTED_COMMAND;
-  }
-}
-
-void serializeRow(Row *src, void *dest) {
-  char *destination = static_cast<char *>(dest);
-
-  memcpy(destination + ID_OFFSET, &(src->id), ID_SIZE);
-  memcpy(destination + USERNAME_OFFSET, &(src->username), USERNAME_SIZE);
-  memcpy(destination + EMAIL_OFFSET, &(src->email), EMAIL_SIZE);
-}
-
-void deserializeRow(void *src, Row *dest) {
-  const char *source = static_cast<const char *>(src);
-
-  memcpy(&(dest->id), source + ID_OFFSET, ID_SIZE);
-  memcpy(&(dest->username), source + USERNAME_OFFSET, USERNAME_SIZE);
-  memcpy(&(dest->email), source + EMAIL_OFFSET, EMAIL_SIZE);
-}
-
-void *cursorValue(Cursor *cursor) {
-  u_int32_t pageNum = cursor->pageNum;
-  void *page = getPage(cursor->table->pager, pageNum);
-
-  return leafNodeValue(page, cursor->cellNum);
-}
-
-void *getPage(Pager *pager, int pageNum) {
-  if (pageNum > TABLE_MAX_PAGES) {
-    cout << "Tried to fetch page number out of bounds. " << pageNum << " > "
-         << TABLE_MAX_PAGES << endl;
-    exit(EXIT_FAILURE);
-  }
-
-  if (pager->pages[pageNum] == nullptr) {
-    // cache miss. Allocate memory and load from file
-    void *page = new char[PAGE_SIZE]();
-    int numPages = pager->fileLength / PAGE_SIZE;
-
-    // We might save a partial page at the end of the file
-    if (pager->fileLength % PAGE_SIZE) {
-      numPages++;
-    }
-
-    if (pageNum <= numPages) {
-      fseek(pager->fileDescriptor, pageNum * PAGE_SIZE, SEEK_SET);
-      int bytesRead = fread(page, 1, PAGE_SIZE, pager->fileDescriptor);
-    }
-    pager->pages[pageNum] = page;
-
-    if (pageNum >= pager->numPages) {
-      pager->numPages = pageNum + 1;
-    }
-  }
-
-  return pager->pages[pageNum];
-}
-
-Table *openDB(const char *filename) {
-  Pager *pager = pagerOpen(filename);
-
-  Table *table = new Table();
-  table->pager = pager;
-  table->rootPageNum = 0;
-
-  if (pager->numPages == 0) {
-    void *rootNode = getPage(pager, 0);
-    initializeLeafNode(rootNode);
-    setNodeRoot(rootNode, true);
-  }
-
-  return table;
-}
-
-void dbClose(Table *table) {
-  Pager *pager = table->pager;
-
-  for (int i = 0; i < pager->numPages; i++) {
-    if (pager->pages[i] == nullptr) {
-      continue;
-    }
-    pagerFlush(pager, i);
-    delete[] static_cast<char *>(pager->pages[i]);
-    pager->pages[i] = nullptr;
-  }
-
-  int result = fclose(pager->fileDescriptor);
-  if (result == -1) {
-    cout << "Error closing db file\n";
-    exit(EXIT_FAILURE);
-  }
-
-  for (int i = 0; i < TABLE_MAX_PAGES; i++) {
-    void *page = pager->pages[i];
-    if (page) {
-      delete[] static_cast<char *>(page);
-      pager->pages[i] = nullptr;
-    }
-  }
-
-  delete pager;
   delete table;
-}
-
-Pager *pagerOpen(const char *filename) {
-  FILE *file = fopen(filename, "r+b");
-
-  if (file == nullptr) {
-    file = fopen(filename, "w+b");
-  }
-
-  Pager *pager = new Pager();
-  pager->fileDescriptor = file;
-  pager->fileLength = getFileSize(filename);
-  pager->numPages = (pager->fileLength / PAGE_SIZE);
-
-  if (pager->fileLength % PAGE_SIZE != 0) {
-    cout << "DB file is not a whole number of pages. Corrupt file." << endl;
-    exit(EXIT_FAILURE);
-  }
-
-  for (int i = 0; i < TABLE_MAX_PAGES; i++) {
-    pager->pages[i] = nullptr;
-  }
-
-  return pager;
-}
-
-long getFileSize(const char *filename) {
-  FILE *fp = fopen(filename, "rb");
-  if (fp == nullptr) {
-    cout << "Unable to open file\n";
-    exit(EXIT_FAILURE);
-  }
-
-  if (fseek(fp, 0, SEEK_END) != 0) {
-    fclose(fp);
-    return -1;
-  }
-
-  long size = ftell(fp);
-
-  fclose(fp);
-
-  return size;
-}
-
-void pagerFlush(Pager *pager, int pageNum) {
-  if (pager->pages[pageNum] == nullptr) {
-    cout << "Tried to flush null\n";
-    exit(EXIT_FAILURE);
-  }
-
-  fseek(pager->fileDescriptor, pageNum * PAGE_SIZE, SEEK_SET);
-
-  int bytesWritten =
-      fwrite(pager->pages[pageNum], 1, PAGE_SIZE, pager->fileDescriptor);
-}
-
-Cursor *tableStart(Table *table) {
-  Cursor *cursor = new Cursor();
-  cursor->table = table;
-  cursor->pageNum = table->rootPageNum;
-  cursor->cellNum = 0;
-
-  void *rootNode = getPage(table->pager, table->rootPageNum);
-  u_int32_t numCells = *leafNodeNumCells(rootNode);
-  cursor->endOfTable = (numCells == 0);
-
-  return cursor;
-}
-
-/* Return the position of the givan key. If key not present
- *   then it returns the position it should be inserted at.
- */
-Cursor *tableFind(Table *table, u_int32_t key) {
-  u_int32_t rootPageNum = table->rootPageNum;
-  void *rootNode = getPage(table->pager, rootPageNum);
-
-  if (getNodeType(rootNode) == NodeType::NODE_LEAF) {
-    return leafNodeFind(table, rootPageNum, key);
-  } else {
-    cout << "Need to implement searching internal nodes" << endl;
-    exit(EXIT_FAILURE);
-  }
-}
-
-Cursor *leafNodeFind(Table *table, u_int32_t pageNum, u_int32_t key) {
-  void *node = getPage(table->pager, pageNum);
-  u_int32_t numCells = *leafNodeNumCells(node);
-
-  Cursor *cursor = new Cursor();
-  cursor->table = table;
-  cursor->pageNum = pageNum;
-
-  // Binary search
-  u_int32_t minIndex = 0;
-  u_int32_t onePastMaxIndex = numCells;
-
-  while (onePastMaxIndex != minIndex) {
-    u_int32_t index = (minIndex + onePastMaxIndex) / 2;
-    u_int32_t keyAtIndex = *leafNodeKey(node, index);
-    if (key == keyAtIndex) {
-      cursor->cellNum = index;
-      return cursor;
-    } else if (key < keyAtIndex) {
-      onePastMaxIndex = index;
-    } else {
-      minIndex = index + 1;
-    }
-  }
-
-  cursor->cellNum = minIndex;
-  return cursor;
-}
-
-void cursorAdvance(Cursor *cursor) {
-  u_int32_t pageNum = cursor->pageNum;
-  void *node = getPage(cursor->table->pager, pageNum);
-  cursor->cellNum++;
-
-  if (cursor->cellNum >= *leafNodeNumCells(node)) {
-    cursor->endOfTable = true;
-  }
-}
-
-u_int32_t *leafNodeNumCells(void *node) {
-  char *bytePtr = static_cast<char *>(node) + LEAF_NODE_NUM_CELLS_OFFSET;
-
-  return reinterpret_cast<u_int32_t *>(bytePtr);
-}
-
-void *leafNodeCell(void *node, u_int32_t cellNum) {
-  return static_cast<char *>(node) + LEAF_NODE_HEADER_SIZE +
-         cellNum * LEAF_NODE_CELL_SIZE;
-}
-
-u_int32_t *leafNodeKey(void *node, u_int32_t cellNum) {
-  return static_cast<u_int32_t *>(leafNodeCell(node, cellNum));
-}
-
-void *leafNodeValue(void *node, u_int32_t cellNum) {
-  return static_cast<char *>(leafNodeCell(node, cellNum)) + LEAF_NODE_KEY_SIZE;
-}
-
-void initializeLeafNode(void *node) {
-  setNodeType(node, NodeType::NODE_LEAF);
-  setNodeRoot(node, false);
-  *leafNodeNumCells(node) = 0;
-}
-void initializeInternalNode(void *node) {
-  setNodeType(node, NodeType::NODE_INTERNAL);
-  setNodeRoot(node, false);
-  *internalNodeNumKeys(node) = 0;
-}
-
-void leafNodeInsert(Cursor *cursor, u_int32_t key, Row *value) {
-  void *node = getPage(cursor->table->pager, cursor->pageNum);
-
-  u_int32_t numCells = *leafNodeNumCells(node);
-  if (numCells >= LEAF_NODE_MAX_CELLS) {
-    // node full
-    leafNodeSplitAndInsert(cursor, key, value);
-    return;
-  }
-
-  if (cursor->cellNum < numCells) {
-    // make room for new cell
-    for (u_int32_t i = numCells; i > cursor->cellNum; i--) {
-      memcpy(leafNodeCell(node, i), leafNodeCell(node, i - 1),
-             LEAF_NODE_CELL_SIZE);
-    }
-  }
-  *(leafNodeNumCells(node)) += 1;
-  *(leafNodeKey(node, cursor->cellNum)) = key;
-  serializeRow(value, leafNodeValue(node, cursor->cellNum));
-}
-
-void printConstants() {
-  cout << "ROW_SIZE: " << ROW_SIZE << endl;
-  cout << "COMMON_NODE_HEADER_SIZE: " << COMMON_NODE_HEADER_SIZE << endl;
-  cout << "LEAF_NODE_HEADER_SIZE: " << LEAF_NODE_HEADER_SIZE << endl;
-  cout << "LEAF_NODE_CELL_SIZE: " << LEAF_NODE_CELL_SIZE << endl;
-  cout << "LEAF_NODE_SPACE_FOR_CELLS: " << LEAF_NODE_SPACE_FOR_CELLS << endl;
-  cout << "LEAF_NODE_MAX_CELLS: " << LEAF_NODE_MAX_CELLS << endl;
-}
-
-NodeType getNodeType(void *node) {
-  uint8_t value = *(static_cast<uint8_t *>(node) + NODE_TYPE_OFFSET);
-  return static_cast<NodeType>(value);
-}
-
-void setNodeType(void *node, NodeType type) {
-  *(static_cast<uint8_t *>(node) + NODE_TYPE_OFFSET) =
-      static_cast<uint8_t>(type);
-}
-
-void leafNodeSplitAndInsert(Cursor *cursor, u_int32_t key, Row *value) {
-  /*
-   * Create a new node and move half the cells over.
-   * Insert the new value in one the two nodes.
-   * Update parent or create a new parent.
-   */
-  void *oldNode = getPage(cursor->table->pager, cursor->pageNum);
-  u_int32_t newPageNum = getUnusedPageNum(cursor->table->pager);
-  void *newNode = getPage(cursor->table->pager, newPageNum);
-  initializeLeafNode(newNode);
-
-  /*
-   * All existing keys plus new key should be divided
-   * evenly between old (left) and new (right) nodes.
-   * Startin from the right, move each key to correct position.
-   */
-
-  for (int32_t i = LEAF_NODE_MAX_CELLS; i >= 0; i--) {
-    void *destinationNode;
-    if (i >= LEAF_NODE_LEFT_SPLIT_COUNT) {
-      destinationNode = newNode;
-    } else {
-      destinationNode = oldNode;
-    }
-    u_int32_t indexWithinNode = i % LEAF_NODE_LEFT_SPLIT_COUNT;
-    void *destination = leafNodeCell(destinationNode, indexWithinNode);
-    if (i == cursor->cellNum) {
-      serializeRow(value, destination);
-    } else if (i > cursor->cellNum) {
-      memcpy(destination, leafNodeCell(oldNode, i - 1), LEAF_NODE_CELL_SIZE);
-    } else {
-      memcpy(destination, leafNodeCell(oldNode, i), LEAF_NODE_CELL_SIZE);
-    }
-  }
-
-  // Update cell count on both leaf nodes
-  *(leafNodeNumCells(oldNode)) = LEAF_NODE_LEFT_SPLIT_COUNT;
-  *(leafNodeNumCells(newNode)) = LEAF_NODE_RIGHT_SPLIT_COUNT;
-
-  if (isNodeRoot(oldNode)) {
-    return createNewRoot(cursor->table, newPageNum);
-  } else {
-    cout << "Need to implement updating parent after split" << endl;
-    exit(EXIT_FAILURE);
-  }
-}
-
-u_int32_t getUnusedPageNum(Pager *pager) { return pager->numPages; }
-
-void createNewRoot(Table *table, u_int32_t rightChildPageNum) {
-  void *root = getPage(table->pager, table->rootPageNum);
-  void *rightChild = getPage(table->pager, rightChildPageNum);
-  u_int32_t leftChildPageNum = getUnusedPageNum(table->pager);
-  void *leftChild = getPage(table->pager, leftChildPageNum);
-
-  memcpy(leftChild, root, PAGE_SIZE);
-  setNodeRoot(leftChild, false);
-
-  initializeInternalNode(root);
-  setNodeRoot(root, true);
-  *internalNodeNumKeys(root) = 1;
-  *internalNodeChild(root, 0) = leftChildPageNum;
-  u_int32_t leftChildMaxKey = getNodeMaxKey(leftChild);
-  *internalNodeKey(root, 0) = leftChildMaxKey;
-  *internalNodeRightChild(root) = rightChildPageNum;
-}
-
-u_int32_t *internalNodeNumKeys(void *node) {
-  char *bytePtr = static_cast<char *>(node) + INTERNAL_NODE_NUM_KEYS_OFFSET;
-
-  return reinterpret_cast<u_int32_t *>(bytePtr);
-}
-
-u_int32_t *internalNodeRightChild(void *node) {
-  char *bytePtr = static_cast<char *>(node) + INTERNAL_NODE_RIGHT_CHILD_OFFSET;
-
-  return reinterpret_cast<u_int32_t *>(bytePtr);
-}
-
-u_int32_t *internalNodeCell(void *node, uint32_t cellNum) {
-  char *bytePtr = (static_cast<char *>(node) + INTERNAL_NODE_HEADER_SIZE) +
-                  cellNum * INTERNAL_NODE_CELL_SIZE;
-
-  return reinterpret_cast<u_int32_t *>(bytePtr);
-}
-
-uint32_t *internalNodeChild(void *node, uint32_t childNum) {
-  uint32_t numKeys = *internalNodeNumKeys(node);
-  if (childNum > numKeys) {
-    cout << "Tried to access " << childNum << " > " << numKeys << endl;
-    exit(EXIT_FAILURE);
-  } else if (childNum == numKeys) {
-    return internalNodeRightChild(node);
-  } else {
-    return internalNodeCell(node, childNum);
-  }
-}
-
-uint32_t *internalNodeKey(void *node, uint32_t keyNum) {
-  return internalNodeCell(node, keyNum) + INTERNAL_NODE_CHILD_SIZE;
-}
-
-uint32_t getNodeMaxKey(void *node) {
-  switch (getNodeType(node)) {
-  case NodeType::NODE_INTERNAL:
-    return *internalNodeKey(node, *internalNodeNumKeys(node) - 1);
-  case NodeType::NODE_LEAF:
-    return *leafNodeKey(node, *leafNodeNumCells(node) - 1);
-  }
-}
-
-bool isNodeRoot(void *node) {
-  uint8_t value = *((uint8_t *)(static_cast<char *>(node) + IS_ROOT_OFFSET));
-  return (bool)value;
-}
-
-void setNodeRoot(void *node, bool isRoot) {
-  uint8_t value = isRoot;
-  *((uint8_t *)(static_cast<char *>(node) + IS_ROOT_OFFSET)) = value;
-}
-
-void indent(uint32_t level) {
-  for (uint32_t i = 0; i < level; i++) {
-    cout << "  ";
-  }
-}
-
-void printTree(Pager *pager, uint32_t pageNum, uint32_t indentationLevel) {
-  void *node = getPage(pager, pageNum);
-  uint32_t numKeys, child;
-
-  switch (getNodeType(node)) {
-  case (NodeType::NODE_LEAF):
-    numKeys = *leafNodeNumCells(node);
-    indent(indentationLevel);
-    cout << "- leaf (size " << numKeys << ")" << endl;
-    for (uint32_t i = 0; i < numKeys; i++) {
-      indent(indentationLevel + 1);
-      cout << "- " << *leafNodeKey(node, i) << endl;
-    }
-    break;
-  case (NodeType::NODE_INTERNAL):
-    numKeys = *internalNodeNumKeys(node);
-    indent(indentationLevel);
-    cout << "- internal (size " << numKeys << ")" << endl;
-    for (uint32_t i = 0; i < numKeys; i++) {
-      child = *internalNodeChild(node, i);
-      printTree(pager, child, indentationLevel + 1);
-
-      indent(indentationLevel + 1);
-      cout << "- key " << *internalNodeKey(node, i) << endl;
-    }
-    child = *internalNodeRightChild(node);
-    printTree(pager, child, indentationLevel + 1);
-    break;
-  }
+  return 0;
 }
