@@ -70,9 +70,9 @@ const uint32_t COMMON_NODE_HEADER_SIZE =
 const uint32_t LEAF_NODE_NUM_CELLS_SIZE = sizeof(uint32_t);
 const uint32_t LEAF_NODE_NUM_CELLS_OFFSET = COMMON_NODE_HEADER_SIZE;
 const uint32_t LEAF_NODE_NEXT_LEAF_SIZE = sizeof(uint32_t);
-const uint32_t LEAF_NODE_NEXT_LEAF_OFFSET = 
+const uint32_t LEAF_NODE_NEXT_LEAF_OFFSET =
     LEAF_NODE_NUM_CELLS_SIZE + LEAF_NODE_NUM_CELLS_OFFSET;
-const uint32_t LEAF_NODE_HEADER_SIZE = COMMON_NODE_HEADER_SIZE + 
+const uint32_t LEAF_NODE_HEADER_SIZE = COMMON_NODE_HEADER_SIZE +
                                        LEAF_NODE_NUM_CELLS_SIZE +
                                        LEAF_NODE_NEXT_LEAF_SIZE;
 
@@ -105,6 +105,7 @@ const uint32_t INTERNAL_NODE_KEY_SIZE = sizeof(uint32_t);
 const uint32_t INTERNAL_NODE_CHILD_SIZE = sizeof(uint32_t);
 const uint32_t INTERNAL_NODE_CELL_SIZE =
     INTERNAL_NODE_KEY_SIZE + INTERNAL_NODE_CHILD_SIZE;
+const uint32_t INTERNAL_NODE_MAX_KEYS = 3;
 
 // ============================================================================
 // 1. ROW: Encapsulates row data and its binary serialization
@@ -336,6 +337,16 @@ public:
     }
   }
 
+  // Return the index of  child which should contain this key
+  uint32_t findChild(uint32_t key) {
+    uint32_t keys = numKeys();
+
+    uint32_t minIndex = 0;
+    uint32_t maxIndex = keys;
+
+    return minIndex;
+  }
+
   // Fixed pointer math: cell(keyNum) is uint8_t*, so + INTERNAL_NODE_CHILD_SIZE
   // moves forward by exactly 4 bytes!
   uint32_t &key(uint32_t keyNum) {
@@ -429,11 +440,15 @@ public:
     uint8_t *rootPage = pager->getPage(rootPageNum);
     uint32_t leftChildPageNum = pager->getUnusedPageNum();
     uint8_t *leftChildPage = pager->getPage(leftChildPageNum);
+    uint8_t *rightChildPage = pager->getPage(rightChildPageNum);
 
     // Copy old root data into leftChildPage
     memcpy(leftChildPage, rootPage, PAGE_SIZE);
     Node leftChild(leftChildPage);
     leftChild.setRoot(false);
+
+    // get rightChild
+    Node rightChild(rightChildPage);
 
     // Re-initialize root page as an Internal Node with 1 key and 2 children
     InternalNode rootNode(rootPage);
@@ -443,6 +458,8 @@ public:
     rootNode.child(0) = leftChildPageNum;
     rootNode.key(0) = getNodeMaxKey(leftChildPage);
     rootNode.rightChild() = rightChildPageNum;
+    leftChild.parent() = rootPageNum;
+    rightChild.parent() = rootPageNum;
   }
 
   void printTree(uint32_t pageNum = 0, uint32_t indentationLevel = 0) {
@@ -502,7 +519,7 @@ private:
     return Cursor(this, pageNum, minIndex);
   }
 
-  Cursor findInInternal( uint32_t pageNum, uint32_t key) {
+  Cursor findInInternal(uint32_t pageNum, uint32_t key) {
     InternalNode node(pager->getPage(pageNum));
     uint32_t numKeys = node.numKeys();
 
@@ -510,28 +527,71 @@ private:
     uint32_t minIndex = 0;
     uint32_t maxIndex = numKeys;
 
-    while(minIndex != maxIndex) {
+    while (minIndex != maxIndex) {
       uint32_t midIndex = (minIndex + maxIndex) / 2;
       uint32_t keyToRight = node.key(midIndex);
 
-      if(keyToRight >= key) {
+      if (keyToRight >= key) {
         maxIndex = midIndex;
       } else {
         minIndex = midIndex + 1;
       }
     }
 
-    uint32_t childNum = node.child(minIndex);
+    uint32_t childIndex = node.findChild(key);
+    uint32_t childNum = node.child(childIndex);
+
     Node child(pager->getPage(childNum));
 
     switch (child.getType()) {
-      case NodeType::NODE_LEAF:
-        return findInLeaf(childNum, key);
-      case NodeType::NODE_INTERNAL:
-        return findInInternal(childNum, key);
+    case NodeType::NODE_LEAF:
+      return findInLeaf(childNum, key);
+    case NodeType::NODE_INTERNAL:
+      return findInInternal(childNum, key);
     }
 
     return Cursor(this, pageNum, minIndex);
+  }
+
+  void updateInternalNodeKey(InternalNode node, uint32_t oldKey,
+                             uint32_t newKey) {
+    uint32_t oldChildIndex = node.child(oldKey);
+    node.key(oldChildIndex) = newKey;
+  }
+
+  // add a new child/key air to parent that corresponds to child
+  void insertIntoInternal(uint32_t parentPageNum, uint32_t childPageNum) {
+    InternalNode parent(pager->getPage(parentPageNum));
+    LeafNode child(pager->getPage(childPageNum));
+    uint32_t childMaxKey = child.getMaxKey();
+    uint32_t index = parent.findChild(childMaxKey);
+
+    uint32_t originalNumKeys = parent.numKeys();
+    parent.numKeys() = originalNumKeys + 1;
+
+    if (originalNumKeys >= INTERNAL_NODE_MAX_KEYS) {
+      cout << "Need to implement splitting internal node" << endl;
+      exit(EXIT_FAILURE);
+    }
+
+    uint32_t rightChildPageNum = parent.rightChild();
+    LeafNode rightChild(pager->getPage(rightChildPageNum));
+    uint32_t rightChildMaxKey = rightChild.getMaxKey();
+
+    if (childMaxKey > rightChildMaxKey) {
+      parent.child(originalNumKeys) = rightChildPageNum;
+      parent.key(originalNumKeys) = rightChildMaxKey;
+      parent.rightChild() = childPageNum;
+    } else {
+      for (uint32_t i = originalNumKeys; i > index; i--) {
+        uint8_t *destination = parent.cell(i);
+        uint8_t *source = parent.cell(i - 1);
+        memcpy(destination, source, INTERNAL_NODE_CELL_SIZE);
+      }
+
+      parent.child(index) = childPageNum;
+      parent.key(index) = childMaxKey;
+    }
   }
 };
 
@@ -547,9 +607,9 @@ inline uint8_t *Cursor::value() {
 inline void Cursor::advance() {
   LeafNode node(table->pager->getPage(pageNum));
   cellNum++;
-  if(cellNum >= node.numCells()) {
+  if (cellNum >= node.numCells()) {
     uint32_t nextPageNum = node.nextLeaf();
-    if(nextPageNum == 0) {
+    if (nextPageNum == 0) {
       // this was rightmost leaf
       endOfTable = true;
     } else {
@@ -583,10 +643,12 @@ inline void Cursor::insert(uint32_t key, const Row &row) {
 // Replaces leafNodeSplitAndInsert()
 inline void Cursor::splitAndInsert(uint32_t key, const Row &row) {
   LeafNode oldNode(table->pager->getPage(pageNum));
+  uint32_t oldMaxKey = oldNode.getMaxKey();
   uint32_t newPageNum = table->pager->getUnusedPageNum();
   uint32_t rootPageNum = table->rootPageNum;
   LeafNode newNode(table->pager->getPage(newPageNum));
   newNode.initialize();
+  newNode.parent() = oldNode.parent();
   newNode.nextLeaf() = oldNode.nextLeaf();
   oldNode.nextLeaf() = newPageNum;
 
@@ -614,8 +676,13 @@ inline void Cursor::splitAndInsert(uint32_t key, const Row &row) {
   if (oldNode.isRoot()) {
     table->createNewRoot(newPageNum);
   } else {
-    cout << "Need to implement upadting parent after split" << endl;
-    exit(EXIT_FAILURE);
+    uint32_t parentPageNum = oldNode.parent();
+    uint32_t newMaxKey = oldNode.getMaxKey();
+    Node parent(table->pager->getPage(parentPageNum));
+
+    updateInternalNodeKey(parent, oldMaxKey, newMaxKey);
+    internalNodeInsert(table, parentPageNum, newPageNum);
+    return;
   }
 }
 
