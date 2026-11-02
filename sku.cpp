@@ -55,6 +55,7 @@ const uint32_t ROW_SIZE = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
 
 const uint32_t PAGE_SIZE = 4096;
 const uint32_t TABLE_MAX_PAGES = 100;
+const uint32_t INVALID_PAGE_NUM = UINT32_MAX;
 
 // Common Node Header Layout
 const uint32_t NODE_TYPE_SIZE = sizeof(uint8_t);
@@ -308,6 +309,7 @@ public:
     setType(NodeType::NODE_INTERNAL);
     setRoot(false);
     numKeys() = 0;
+    rightChild() = INVALID_PAGE_NUM;
   }
 
   uint32_t &numKeys() {
@@ -331,9 +333,20 @@ public:
            << endl;
       exit(EXIT_FAILURE);
     } else if (childNum == keys) {
-      return rightChild();
+      uint32_t rightChild = this->rightChild();
+      if(rightChild == INVALID_PAGE_NUM) {
+        cout << "Tried to access right child of node, but was invalid page" << endl;
+        exit(EXIT_FAILURE);
+      }
+      return rightChild;
     } else {
-      return *reinterpret_cast<uint32_t *>(cell(childNum));
+      uint32_t child = *reinterpret_cast<uint32_t *>(cell(childNum));
+      if(child == INVALID_PAGE_NUM) {
+        cout << "Tried to access child " << childNum << " of node, but was invalid" << endl;
+        exit(EXIT_FAILURE);
+      }
+
+      return child;
     }
   }
 
@@ -490,12 +503,94 @@ public:
       uint32_t numKeys = internal.numKeys();
       indent(indentationLevel);
       cout << "- internal (size " << numKeys << ")" << endl;
-      for (uint32_t i = 0; i < numKeys; i++) {
-        printTree(internal.child(i), indentationLevel + 1);
-        indent(indentationLevel + 1);
-        cout << "- key " << internal.key(i) << endl;
+      if(numKeys > 0) {
+        for (uint32_t i = 0; i < numKeys; i++) {
+          printTree(internal.child(i), indentationLevel + 1);
+          indent(indentationLevel + 1);
+          cout << "- key " << internal.key(i) << endl;
+        }
+        printTree(internal.rightChild(), indentationLevel + 1);
       }
-      printTree(internal.rightChild(), indentationLevel + 1);
+      
+    }
+  }
+
+  void splitAndInsertInternal(uint32_t parentPageNum, uint32_t childPageNum) {
+    InternalNode oldNode(pager->getPage(parentPageNum));
+    uint32_t childMaxKey = getNodeMaxKey(pager->getPage(childPageNum));
+
+    // create new right internal node page
+    uint32_t newPageNum = pager->getUnusedPageNum();
+    InternalNode newNode(pager->getPage(newPageNum));
+    newNode.initialize();
+
+    // Temporary array to hold all children and keys before splitting
+    // INTERNAL_NODE_MAX_KEYS is typically small (e.g. 3), so a small static array is safe.
+    uint32_t childCount = oldNode.numKeys() + 1;
+    uint32_t tempChildren[10];
+    uint32_t tempKeys[10];
+
+    // populate temp arrays with existing k-v pairs
+    uint32_t insertIndex = oldNode.findChild(childMaxKey);
+
+    for(uint32_t i = 0, j = 0; i < childCount; i++, j++) {
+      if(i == insertIndex) {
+        tempChildren[i] = childPageNum;
+        if(i < oldNode.numKeys()) {
+          tempKeys[i] = oldNode.key(i);
+        }
+        j--;
+      } else if(i == childCount - 1) {
+        tempChildren[i] = oldNode.rightChild();
+      } else {
+        tempChildren[i] = oldNode.child(j);
+        tempKeys[i] = oldNode.key(j);
+      }
+    }
+
+    if(insertIndex == oldNode.numKeys()) {
+      tempChildren[childCount - 1] = oldNode.rightChild();
+      tempChildren[childCount] = childPageNum;
+      tempKeys[childCount-1] = childMaxKey;
+      childCount++;
+    } else {
+      tempKeys[insertIndex] = childMaxKey;
+    }
+
+    uint32_t rightSplitCount = (childCount + 1) / 2;
+    uint32_t leftSplitCount = childCount - rightSplitCount;
+
+    oldNode.numKeys() = leftSplitCount - 1;
+    for(uint32_t i = 0; i < leftSplitCount - 1; i++) {
+      oldNode.child(i) = tempChildren[i];
+      oldNode.key(i) = tempKeys[i];
+    }
+    oldNode.rightChild() = tempChildren[leftSplitCount - 1];
+
+    newNode.numKeys() = rightSplitCount - 1;
+    for(uint32_t i = 0; i < rightSplitCount - 1; i++) {
+      newNode.child(i) = tempChildren[leftSplitCount + i];
+      newNode.key(i) = tempKeys[leftSplitCount + i];
+    }
+    newNode.rightChild() = tempChildren[childCount - 1];
+
+    for(uint32_t i = 0; i <= newNode.numKeys(); i++) {
+      uint32_t childPage = newNode.child(i);
+      Node cNode(pager->getPage(childPage));
+      cNode.parent() = newPageNum;
+    }
+
+    Node rightChildNode(pager->getPage(newNode.rightChild()));
+    rightChildNode.parent() = newPageNum;
+
+    uint32_t middleKey = tempKeys[leftSplitCount - 1];
+
+    if(oldNode.isRoot()) {
+      createNewRoot(newPageNum);
+    } else {
+      uint32_t parentOfParent = oldNode.parent();
+      newNode.parent() = parentOfParent;
+      insertIntoInternal(parentOfParent, newPageNum);
     }
   }
 
@@ -507,18 +602,27 @@ public:
     uint32_t index = parent.findChild(childMaxKey);
 
     uint32_t originalNumKeys = parent.numKeys();
-    parent.numKeys() = originalNumKeys + 1;
 
     if (originalNumKeys >= INTERNAL_NODE_MAX_KEYS) {
-      cout << "Need to implement splitting internal node" << endl;
-      exit(EXIT_FAILURE);
+      splitAndInsertInternal(parentPageNum, childPageNum); 
+      return;
     }
 
     uint32_t rightChildPageNum = parent.rightChild();
+
+    if(rightChildPageNum == INVALID_PAGE_NUM) {
+      parent.rightChild() = childPageNum;
+      return;
+    }
+
     LeafNode rightChild(pager->getPage(rightChildPageNum));
+
+    parent.numKeys() = originalNumKeys + 1;
+    
     uint32_t rightChildMaxKey = rightChild.getMaxKey();
 
     if (childMaxKey > rightChildMaxKey) {
+      // replace right child
       parent.child(originalNumKeys) = rightChildPageNum;
       parent.key(originalNumKeys) = rightChildMaxKey;
       parent.rightChild() = childPageNum;
@@ -532,11 +636,14 @@ public:
       parent.child(index) = childPageNum;
       parent.key(index) = childMaxKey;
     }
+
+    Node childNode(pager->getPage(childPageNum));
+    childNode.parent() = parentPageNum;
   }
 
   void updateInternalNodeKey(InternalNode node, uint32_t oldKey,
                              uint32_t newKey) {
-    uint32_t oldChildIndex = node.child(oldKey);
+    uint32_t oldChildIndex = node.findChild(oldKey);
     node.key(oldChildIndex) = newKey;
   }
 
