@@ -338,11 +338,21 @@ public:
   }
 
   // Return the index of  child which should contain this key
-  uint32_t findChild(uint32_t key) {
+  uint32_t findChild(uint32_t keyNum) {
     uint32_t keys = numKeys();
 
     uint32_t minIndex = 0;
     uint32_t maxIndex = keys;
+
+    while(minIndex != maxIndex) {
+      uint32_t index = (minIndex + maxIndex) / 2;
+      uint32_t keyToRight = key(index);
+      if(keyToRight >= keyNum) {
+        maxIndex = index;
+      } else {
+        minIndex = index + 1;
+      }
+    }
 
     return minIndex;
   }
@@ -489,6 +499,47 @@ public:
     }
   }
 
+  // add a new child/key air to parent that corresponds to child
+  void insertIntoInternal(uint32_t parentPageNum, uint32_t childPageNum) {
+    InternalNode parent(pager->getPage(parentPageNum));
+    LeafNode child(pager->getPage(childPageNum));
+    uint32_t childMaxKey = child.getMaxKey();
+    uint32_t index = parent.findChild(childMaxKey);
+
+    uint32_t originalNumKeys = parent.numKeys();
+    parent.numKeys() = originalNumKeys + 1;
+
+    if (originalNumKeys >= INTERNAL_NODE_MAX_KEYS) {
+      cout << "Need to implement splitting internal node" << endl;
+      exit(EXIT_FAILURE);
+    }
+
+    uint32_t rightChildPageNum = parent.rightChild();
+    LeafNode rightChild(pager->getPage(rightChildPageNum));
+    uint32_t rightChildMaxKey = rightChild.getMaxKey();
+
+    if (childMaxKey > rightChildMaxKey) {
+      parent.child(originalNumKeys) = rightChildPageNum;
+      parent.key(originalNumKeys) = rightChildMaxKey;
+      parent.rightChild() = childPageNum;
+    } else {
+      for (uint32_t i = originalNumKeys; i > index; i--) {
+        uint8_t *destination = parent.cell(i);
+        uint8_t *source = parent.cell(i - 1);
+        memcpy(destination, source, INTERNAL_NODE_CELL_SIZE);
+      }
+
+      parent.child(index) = childPageNum;
+      parent.key(index) = childMaxKey;
+    }
+  }
+
+  void updateInternalNodeKey(InternalNode node, uint32_t oldKey,
+                             uint32_t newKey) {
+    uint32_t oldChildIndex = node.child(oldKey);
+    node.key(oldChildIndex) = newKey;
+  }
+
 private:
   static void indent(uint32_t level) {
     for (uint32_t i = 0; i < level; i++) {
@@ -553,46 +604,7 @@ private:
     return Cursor(this, pageNum, minIndex);
   }
 
-  void updateInternalNodeKey(InternalNode node, uint32_t oldKey,
-                             uint32_t newKey) {
-    uint32_t oldChildIndex = node.child(oldKey);
-    node.key(oldChildIndex) = newKey;
-  }
-
-  // add a new child/key air to parent that corresponds to child
-  void insertIntoInternal(uint32_t parentPageNum, uint32_t childPageNum) {
-    InternalNode parent(pager->getPage(parentPageNum));
-    LeafNode child(pager->getPage(childPageNum));
-    uint32_t childMaxKey = child.getMaxKey();
-    uint32_t index = parent.findChild(childMaxKey);
-
-    uint32_t originalNumKeys = parent.numKeys();
-    parent.numKeys() = originalNumKeys + 1;
-
-    if (originalNumKeys >= INTERNAL_NODE_MAX_KEYS) {
-      cout << "Need to implement splitting internal node" << endl;
-      exit(EXIT_FAILURE);
-    }
-
-    uint32_t rightChildPageNum = parent.rightChild();
-    LeafNode rightChild(pager->getPage(rightChildPageNum));
-    uint32_t rightChildMaxKey = rightChild.getMaxKey();
-
-    if (childMaxKey > rightChildMaxKey) {
-      parent.child(originalNumKeys) = rightChildPageNum;
-      parent.key(originalNumKeys) = rightChildMaxKey;
-      parent.rightChild() = childPageNum;
-    } else {
-      for (uint32_t i = originalNumKeys; i > index; i--) {
-        uint8_t *destination = parent.cell(i);
-        uint8_t *source = parent.cell(i - 1);
-        memcpy(destination, source, INTERNAL_NODE_CELL_SIZE);
-      }
-
-      parent.child(index) = childPageNum;
-      parent.key(index) = childMaxKey;
-    }
-  }
+  
 };
 
 // ============================================================================
@@ -678,10 +690,10 @@ inline void Cursor::splitAndInsert(uint32_t key, const Row &row) {
   } else {
     uint32_t parentPageNum = oldNode.parent();
     uint32_t newMaxKey = oldNode.getMaxKey();
-    Node parent(table->pager->getPage(parentPageNum));
+    InternalNode parent(table->pager->getPage(parentPageNum));
 
-    updateInternalNodeKey(parent, oldMaxKey, newMaxKey);
-    internalNodeInsert(table, parentPageNum, newPageNum);
+    table->updateInternalNodeKey(parent, oldMaxKey, newMaxKey);
+    table->insertIntoInternal(parentPageNum, newPageNum);
     return;
   }
 }
