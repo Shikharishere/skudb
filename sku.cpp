@@ -319,7 +319,8 @@ public:
            (cellNum * INTERNAL_NODE_CELL_SIZE);
   }
 
-  // FIXED: Returns a direct reference into the 4KB page buffer, NEVER a local variable!
+  // FIXED: Returns a direct reference into the 4KB page buffer, NEVER a local
+  // variable!
   uint32_t &child(uint32_t childNum) {
     uint32_t keys = numKeys();
     if (childNum > keys) {
@@ -357,7 +358,8 @@ public:
   }
 };
 
-// FIXED: For an internal node, its max key is recursively the max key of its right child!
+// FIXED: For an internal node, its max key is recursively the max key of its
+// right child!
 uint32_t getNodeMaxKey(Pager *pager, uint8_t *pageData) {
   Node node(pageData);
   if (node.getType() == NodeType::NODE_LEAF) {
@@ -428,7 +430,8 @@ public:
     }
   }
 
-  // FIXED: Updates grandchildren parent pointers if old root was an internal node
+  // FIXED: Updates grandchildren parent pointers if old root was an internal
+  // node
   void createNewRoot(uint32_t rightChildPageNum) {
     uint8_t *rootPage = pager->getPage(rootPageNum);
     uint8_t *rightChildPage = pager->getPage(rightChildPageNum);
@@ -519,7 +522,8 @@ public:
     if (splittingRoot) {
       createNewRoot(newPageNum);
       parentPage = pager->getPage(rootPageNum);
-      // If we are splitting the root, createNewRoot copied old root to its left child (child 0)
+      // If we are splitting the root, createNewRoot copied old root to its left
+      // child (child 0)
       InternalNode rootInternal(parentPage);
       oldPageNum = rootInternal.child(0);
       oldNode = InternalNode(pager->getPage(oldPageNum));
@@ -534,13 +538,16 @@ public:
     uint32_t curPageNum = oldNode.rightChild();
     uint8_t *curPage = pager->getPage(curPageNum);
 
-    // First put right child into new node and set right child of old node to invalid page number
+    // First put right child into new node and set right child of old node to
+    // invalid page number
     insertIntoInternal(newPageNum, curPageNum);
     Node(curPage).parent() = newPageNum;
     oldNode.rightChild() = INVALID_PAGE_NUM;
 
-    // For each key until you get to the middle key, move the key and the child to the new node
-    for (int i = INTERNAL_NODE_MAX_KEYS - 1; i > INTERNAL_NODE_MAX_KEYS / 2; i--) {
+    // For each key until you get to the middle key, move the key and the child
+    // to the new node
+    for (int i = INTERNAL_NODE_MAX_KEYS - 1; i > INTERNAL_NODE_MAX_KEYS / 2;
+         i--) {
       curPageNum = oldNode.child(i);
       curPage = pager->getPage(curPageNum);
 
@@ -550,21 +557,23 @@ public:
       oldNode.numKeys()--;
     }
 
-    // Set child before middle key, which is now the highest key, to be node's right child,
-    // and decrement number of keys
+    // Set child before middle key, which is now the highest key, to be node's
+    // right child, and decrement number of keys
     oldNode.rightChild() = oldNode.child(oldNode.numKeys() - 1);
     oldNode.numKeys()--;
 
-    // Determine which of the two nodes after the split should contain the child to be inserted,
-    // and insert the child
+    // Determine which of the two nodes after the split should contain the child
+    // to be inserted, and insert the child
     uint32_t maxAfterSplit = getNodeMaxKey(pager, oldNode.raw());
-    uint32_t destinationPageNum = (childMax < maxAfterSplit) ? oldPageNum : newPageNum;
+    uint32_t destinationPageNum =
+        (childMax < maxAfterSplit) ? oldPageNum : newPageNum;
 
     insertIntoInternal(destinationPageNum, childPageNum);
     Node(childPage).parent() = destinationPageNum;
 
     InternalNode parentInternal(parentPage);
-    updateInternalNodeKey(parentInternal, oldMax, getNodeMaxKey(pager, oldNode.raw()));
+    updateInternalNodeKey(parentInternal, oldMax,
+                          getNodeMaxKey(pager, oldNode.raw()));
 
     if (!splittingRoot) {
       insertIntoInternal(oldNode.parent(), newPageNum);
@@ -595,8 +604,9 @@ public:
 
     uint8_t *rightChildPage = pager->getPage(rightChildPageNum);
 
-    // If we are already at the max number of keys, we cannot increment before splitting.
-    // Since we handled >= INTERNAL_NODE_MAX_KEYS above, it is safe to increment here.
+    // If we are already at the max number of keys, we cannot increment before
+    // splitting. Since we handled >= INTERNAL_NODE_MAX_KEYS above, it is safe
+    // to increment here.
     parent.numKeys() = originalNumKeys + 1;
 
     uint32_t rightChildMaxKey = getNodeMaxKey(pager, rightChildPage);
