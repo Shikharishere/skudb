@@ -20,7 +20,8 @@ enum class ExecuteResult {
   EXECUTE_TABLE_FULL,
   EXECUTE_SUCCESS,
   EXECUTE_DUPLICATE_KEY,
-  EXECUTE_UNSUPPORTED_COMMAND
+  EXECUTE_UNSUPPORTED_COMMAND,
+  EXECUTE_KEY_NOT_FOUND
 };
 
 enum class MetaCommandResult {
@@ -36,7 +37,7 @@ enum class PrepareResult {
   PREPARE_NEGATIVE_ID
 };
 
-enum class StatementType { STATEMENT_INSERT, STATEMENT_SELECT };
+enum class StatementType { STATEMENT_INSERT, STATEMENT_SELECT, STATEMENT_UPDATE, STATEMENT_DELETE };
 
 enum class NodeType : uint8_t { NODE_INTERNAL, NODE_LEAF };
 
@@ -319,7 +320,7 @@ public:
            (cellNum * INTERNAL_NODE_CELL_SIZE);
   }
 
-  // FIXED: Returns a direct reference into the 4KB page buffer, NEVER a local
+  // Returns a direct reference into the 4KB page buffer, NEVER a local
   // variable!
   uint32_t &child(uint32_t childNum) {
     uint32_t keys = numKeys();
@@ -358,7 +359,7 @@ public:
   }
 };
 
-// FIXED: For an internal node, its max key is recursively the max key of its
+// For an internal node, its max key is recursively the max key of its
 // right child!
 uint32_t getNodeMaxKey(Pager *pager, uint8_t *pageData) {
   Node node(pageData);
@@ -388,6 +389,7 @@ public:
   uint8_t *value();
   void advance();
   void insert(uint32_t key, const Row &row);
+  void erase();
 
 private:
   void splitAndInsert(uint32_t key, const Row &row);
@@ -430,7 +432,7 @@ public:
     }
   }
 
-  // FIXED: Updates grandchildren parent pointers if old root was an internal
+  // Updates grandchildren parent pointers if old root was an internal
   // node
   void createNewRoot(uint32_t rightChildPageNum) {
     uint8_t *rootPage = pager->getPage(rootPageNum);
@@ -504,7 +506,6 @@ public:
     }
   }
 
-  // Exact C++ translation of cstack's Part 14 internal_node_split_and_insert
   void splitAndInsertInternal(uint32_t parentPageNum, uint32_t childPageNum) {
     uint32_t oldPageNum = parentPageNum;
     InternalNode oldNode(pager->getPage(parentPageNum));
@@ -634,6 +635,154 @@ public:
     node.key(oldChildIndex) = newKey;
   }
 
+  void rebalanceLeafNode(uint32_t pageNum) {
+    LeafNode node(pager->getPage(pageNum));
+    uint32_t parentPageNum = node.parent();
+    InternalNode parent(pager->getPage(parentPageNum));
+
+    // find node's exact index
+    uint32_t childIndex = 0;
+    while (childIndex <= parent.numKeys()) {
+      if (parent.child(childIndex) == pageNum) {
+        break;
+      }
+      childIndex++;
+    }
+
+    uint32_t leftSiblingPageNum = INVALID_PAGE_NUM;
+    uint32_t rightSiblingPageNum = INVALID_PAGE_NUM;
+
+    if (childIndex > 0) {
+      leftSiblingPageNum = parent.child(childIndex - 1);
+    } 
+    if (childIndex < parent.numKeys()) {
+      rightSiblingPageNum = parent.child(childIndex + 1);
+    }
+
+    uint32_t minCells = LEAF_NODE_MAX_CELLS / 2;
+
+    // try to borrow from left sibling
+    if(leftSiblingPageNum != INVALID_PAGE_NUM) {
+      LeafNode leftSibling(pager->getPage(leftSiblingPageNum));
+      if(leftSibling.numCells() > minCells) {
+        uint32_t oldLeftMax = leftSibling.getMaxKey();
+
+        // shift all our cells to the right by 1 to make a hold at index 0
+        for (uint32_t i = node.numCells(); i > 0; i--) {
+          memcpy(node.cell(i), node.cell(i - 1), LEAF_NODE_CELL_SIZE);
+        }
+
+        memcpy(node.cell(0), leftSibling.cell(leftSibling.numCells() - 1), LEAF_NODE_CELL_SIZE);
+
+        node.numCells() += 1;
+        leftSibling.numCells() -= 1;
+
+        // update the parent
+        uint32_t newLeftMax = leftSibling.getMaxKey();
+        updateInternalNodeKey(parent, oldLeftMax, newLeftMax);
+        return;
+      }
+    }
+
+    // try to borrow from right sibling
+    if(rightSiblingPageNum != INVALID_PAGE_NUM) {
+      LeafNode rightSibling(pager->getPage(rightSiblingPageNum));
+      if(rightSibling.numCells() > minCells) {
+        uint32_t oldNodeMax = node.getMaxKey();
+
+        memcpy(node.cell(node.numCells()), rightSibling.cell(0), LEAF_NODE_CELL_SIZE);
+
+        // shift all right siblings cells to left by 1 
+        for(uint32_t i = 0; i < rightSibling.numCells() - 1; i++) {
+          memcpy(rightSibling.cell(i), rightSibling.cell(i + 1), LEAF_NODE_CELL_SIZE);
+        }
+
+        node.numCells() += 1;
+        rightSibling.numCells() -= 1;
+
+        // update the parent
+        uint32_t newNodeMax = node.getMaxKey();
+        updateInternalNodeKey(parent, oldNodeMax, newNodeMax);
+        return;
+      }
+    }
+
+    // If both siblings are at bare min
+    // we must merge (left first if not possiblethen with right)
+    if (leftSiblingPageNum != INVALID_PAGE_NUM) {
+      mergeLeafNodes(leftSiblingPageNum, pageNum);
+    } else {
+      mergeLeafNodes(pageNum, rightSiblingPageNum);
+    }
+  }
+
+  void mergeLeafNodes(uint32_t leftPageNum, uint32_t rightPageNum) {
+    LeafNode leftNode(pager->getPage(leftPageNum));
+    LeafNode rightNode(pager->getPage(rightPageNum));
+
+    uint32_t leftNumCells = leftNode.numCells();
+    uint32_t rightNumCells = rightNode.numCells();
+
+    for(uint32_t i = 0; i < rightNumCells; i++) {
+      memcpy(leftNode.cell(leftNumCells + 1), rightNode.cell(i), LEAF_NODE_CELL_SIZE);
+    }
+
+    leftNode.numCells() = leftNumCells + rightNumCells;
+    leftNode.nextLeaf() = rightNode.nextLeaf();
+
+    // deleting the empty right node
+    uint32_t parentPageNum = leftNode.parent();
+    deleteFromInternal(parentPageNum, rightPageNum);
+  }
+
+  // extract everything onto a temporary array, delete the child and write array back
+  void deleteFromInternal(uint32_t parentPageNum, uint32_t childPageNum) {
+    InternalNode parent(pager->getPage(parentPageNum));
+    uint32_t originalNumKeys = parent.numKeys();
+
+    // temporary arrays
+    uint32_t tempChildren[10];
+    uint32_t tempKeys[10];
+    uint32_t childIndex = 0;
+
+    for(uint32_t i = 0; i <= originalNumKeys; i++) {
+      tempChildren[i] = parent.child(i);
+      if(tempChildren[i] == childPageNum) {
+        childIndex = i;
+      }
+      if(i < originalNumKeys) {
+        tempKeys[i] = parent.key(i);
+      }
+    }
+
+    // shift the children array 
+    for(uint32_t i = childIndex; i < originalNumKeys; i++) {
+      tempChildren[i] = tempChildren[i + 1];
+    }
+
+    // shift the keys array
+    uint32_t keyIndex = (childIndex < 0) ? childIndex - 1 : 0;
+    for(uint32_t i = keyIndex; i < originalNumKeys; i++) {
+      tempKeys[i] = tempKeys[i + 1];
+    }
+
+    // write arrays back to the parent
+    parent.numKeys() = originalNumKeys - 1;
+    for(uint32_t i = 0; i < parent.numKeys(); i++) {
+      *reinterpret_cast<uint32_t *>(parent.cell(i)) = tempChildren[i];
+      parent.key(i) = tempKeys[i];
+    }
+    parent.rightChild() = tempChildren[parent.numKeys()];
+
+    if (parent.isRoot() && parent.numKeys() == 0) {
+      rootPageNum = parent.rightChild();
+      Node newRoot(pager->getPage(rootPageNum));
+      newRoot.setRoot(true);
+    } else if (!parent.isRoot() && parent.numKeys() < INTERNAL_NODE_MAX_KEYS / 2) {
+      cout << "Uh :)" << endl;
+    }
+  }
+
 private:
   static void indent(uint32_t level) {
     for (uint32_t i = 0; i < level; i++) {
@@ -676,6 +825,7 @@ private:
       return findInInternal(childNum, key);
     }
   }
+
 };
 
 // ============================================================================
@@ -718,6 +868,25 @@ inline void Cursor::insert(uint32_t key, const Row &row) {
   node.numCells() += 1;
   node.key(cellNum) = key;
   row.serialize(node.value(cellNum));
+}
+
+inline void Cursor::erase() {
+  LeafNode node(table->pager->getPage(pageNum));
+  uint32_t numCells = node.numCells();
+
+  // shifting every cell one slot to left
+  for(uint32_t i = cellNum; i < numCells - 1; i++) {
+    memcpy(node.cell(i), node.cell(i + 1), LEAF_NODE_CELL_SIZE);
+  }
+
+  // shrink node's cell count
+  node.numCells() -= 1;
+
+  uint32_t minCells = LEAF_NODE_MAX_CELLS / 2;
+
+  if(!node.isRoot() && node.numCells() < minCells) {
+    table->rebalanceLeafNode(pageNum);
+  }
 }
 
 inline void Cursor::splitAndInsert(uint32_t key, const Row &row) {
@@ -827,6 +996,40 @@ PrepareResult prepareStatement(string inputBuffer, Statement *statement) {
   } else if (command == "select") {
     statement->type = StatementType::STATEMENT_SELECT;
     return PrepareResult::PREPARE_SUCCESS;
+  } else if (command == "update") {
+    statement->type = StatementType::STATEMENT_UPDATE;
+    int id;
+    string usernameStr, emailStr;
+    if (ss >> id >> usernameStr >> emailStr) {
+      if(usernameStr.length() >= COLUMN_USERNAME_SIZE) {
+        return PrepareResult::PREPARE_STRING_TOO_LONG;
+      }
+      if (emailStr.length() >= COLUMN_EMAIL_SIZE) {
+        return PrepareResult::PREPARE_STRING_TOO_LONG;
+      }
+      if (id < 0) {
+        return PrepareResult::PREPARE_NEGATIVE_ID;
+      }
+
+      statement->row_to_insert.id = static_cast<uint32_t>(id);
+      strcpy(statement->row_to_insert.username, usernameStr.c_str());
+      strcpy(statement->row_to_insert.email, emailStr.c_str());
+      return PrepareResult::PREPARE_SUCCESS;
+    } else {
+      return PrepareResult::PREPARE_SYNTAX_ERROR;
+    }
+  } else if (command == "delete") {
+    statement->type = StatementType::STATEMENT_DELETE;
+    int id;
+    if(ss >> id) {
+      if(id < 0) {
+        return PrepareResult::PREPARE_NEGATIVE_ID;
+      }
+      statement->row_to_insert.id = static_cast<uint32_t>(id);
+      return PrepareResult::PREPARE_SUCCESS;
+    } else {
+      return PrepareResult::PREPARE_SYNTAX_ERROR;
+    }
   }
 
   return PrepareResult::PREPARE_UNRECOGNIZED_STATEMENT;
@@ -865,12 +1068,48 @@ ExecuteResult executeSelect(Statement *statement, Table *table) {
   return ExecuteResult::EXECUTE_SUCCESS;
 }
 
+ExecuteResult executeUpdate(Statement *statement, Table *table) {
+  Row &rowToUpdate = statement->row_to_insert;
+  uint32_t keyToUpdate = rowToUpdate.id;
+
+  Cursor cursor = table->find(keyToUpdate);
+  LeafNode node(table->pager->getPage(cursor.pageNum));
+
+  if(cursor.cellNum < node.numCells() && node.key(cursor.cellNum) == keyToUpdate) {
+    rowToUpdate.serialize(cursor.value());
+    cout << "\nUpdated 1 row successfully!" << endl;
+    return ExecuteResult::EXECUTE_SUCCESS;
+  }
+
+  return ExecuteResult::EXECUTE_KEY_NOT_FOUND;
+}
+
+ExecuteResult executeDelete(Statement *statement, Table *table) {
+
+  uint32_t keyToDelete = statement->row_to_insert.id;
+
+  Cursor cursor = table->find(keyToDelete);
+  LeafNode node(table->pager->getPage(cursor.pageNum));
+
+  if(cursor.cellNum < node.numCells() && node.key(cursor.cellNum) == keyToDelete) {
+    cursor.erase();
+    cout << "\nDeleted 1 row successfully!" << endl;
+    return ExecuteResult::EXECUTE_SUCCESS;
+  }
+
+  return ExecuteResult::EXECUTE_KEY_NOT_FOUND;
+}
+
 ExecuteResult executeStatement(Statement *statement, Table *table) {
   switch (statement->type) {
   case StatementType::STATEMENT_INSERT:
     return executeInsert(statement, table);
   case StatementType::STATEMENT_SELECT:
     return executeSelect(statement, table);
+  case StatementType::STATEMENT_UPDATE:
+    return executeUpdate(statement, table);
+  case StatementType::STATEMENT_DELETE:
+    return executeDelete(statement, table);
   default:
     return ExecuteResult::EXECUTE_UNSUPPORTED_COMMAND;
   }
@@ -933,10 +1172,13 @@ int main(int argc, char *argv[]) {
       cout << "\nError: Duplicate key.\n";
       break;
     case ExecuteResult::EXECUTE_TABLE_FULL:
-      cout << "\nError: Table full! Meow" << endl;
+      cout << "\nError: Table full! Meow\n";
       break;
     case ExecuteResult::EXECUTE_UNSUPPORTED_COMMAND:
       cout << "\nError: Unsupported command.\n";
+      break;
+    case ExecuteResult::EXECUTE_KEY_NOT_FOUND:
+      cout << "\nError: Key not found.\n";
       break;
     }
   }
