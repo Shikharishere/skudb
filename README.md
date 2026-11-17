@@ -25,7 +25,7 @@
 Currently, skuDB only supports SELECT and INSERT statements.
 As of now, users can only work with one table and that too with a pre-defined schema. 
 So, in future I want to add features like:
-1. Support for UPDATE and DELETE statements. 
-2. Ability to work with multiple tables
+- [x] Support for UPDATE and DELETE statements. 
+- [ ] Ability to work with multiple tables
 
 Peace!
